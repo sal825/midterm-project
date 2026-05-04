@@ -40,21 +40,20 @@ function App() {
   const [isRegistering, setIsRegistering] = useState(false);
   const scrollRef = useRef();
 
-  // 1. 監聽登入：設定你指定的預設頭像
+  // 1. 監聽登入：強化名稱抓取邏輯
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
-      setUser(currentUser);
       if (currentUser) {
         const userRef = doc(db, "users", currentUser.uid);
         const userSnap = await getDoc(userRef);
         const dbData = userSnap.exists() ? userSnap.data() : {};
         
-        // --- 設定你指定的預設網址 ---
         const MY_DEFAULT_AVATAR = "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQX5yy5UXGD6VOurditkh6kO3et1ydkRMnzAw&s";
 
         const initialData = {
           uid: currentUser.uid,
-          displayName: dbData.displayName || currentUser.displayName || currentUser.email,
+          // 優先級：資料庫名稱 > Auth 顯示名稱 > 註冊時填寫的暫存名稱 > Email
+          displayName: dbData.displayName || currentUser.displayName || username || currentUser.email, 
           photoURL: dbData.photoURL || currentUser.photoURL || MY_DEFAULT_AVATAR,
           email: currentUser.email || "",
           phone: dbData.phone || "",
@@ -62,16 +61,18 @@ function App() {
         };
         
         setProfileData(initialData);
-        // 使用 merge: true 確保不會覆蓋掉已存在的自定義資料
+        setUser({ ...currentUser, displayName: initialData.displayName, photoURL: initialData.photoURL });
         await setDoc(userRef, initialData, { merge: true });
 
         if (Notification.permission !== "granted") Notification.requestPermission();
+      } else {
+        setUser(null);
       }
     });
     return () => unsubscribe();
-  }, []);
+  }, [username]); // 加入 username 依賴
 
-  // 2. 獲取參與的房間
+  // 2. 獲取房間
   useEffect(() => {
     if (!user) return;
     const q = query(collection(db, "rooms"), where("members", "array-contains", user.uid));
@@ -81,7 +82,7 @@ function App() {
     return () => unsubscribe();
   }, [user]);
 
-  // 3. 獲取訊息與通知
+  // 3. 訊息與通知
   useEffect(() => {
     if (!activeRoom || !user) return;
     const q = query(collection(db, "rooms", activeRoom.id, "messages"), orderBy("createdAt", "asc"));
@@ -99,7 +100,7 @@ function App() {
     return () => unsubscribe();
   }, [activeRoom, user, messages.length]);
 
-  // 4. 監聽所有人資料 (用於同步頭像顯示)
+  // 4. 監聽所有人
   useEffect(() => {
     const q = query(collection(db, "users"));
     const unsubscribe = onSnapshot(q, (snapshot) => {
@@ -108,18 +109,10 @@ function App() {
     return () => unsubscribe();
   }, []);
 
-  // 儲存個人資料 (User Profile 10%)
   const handleSaveProfile = async () => {
     try {
-      if (profileData.email !== user.email) {
-        await updateEmail(auth.currentUser, profileData.email);
-      }
-
-      await updateProfile(auth.currentUser, {
-        displayName: profileData.displayName,
-        photoURL: profileData.photoURL
-      });
-
+      if (profileData.email !== user.email) await updateEmail(auth.currentUser, profileData.email);
+      await updateProfile(auth.currentUser, { displayName: profileData.displayName, photoURL: profileData.photoURL });
       await updateDoc(doc(db, "users", user.uid), {
         displayName: profileData.displayName,
         photoURL: profileData.photoURL,
@@ -127,12 +120,9 @@ function App() {
         phone: profileData.phone,
         address: profileData.address
       });
-
       alert("更新成功！");
       setIsProfileOpen(false);
-    } catch (e) {
-      alert("儲存失敗: " + (e.code === 'auth/requires-recent-login' ? "請重新登入後再修改" : e.message));
-    }
+    } catch (e) { alert("儲存失敗: " + e.message); }
   };
 
   const getRoomDisplayName = (room) => {
@@ -148,12 +138,7 @@ function App() {
   const createRoom = async (targetUser) => {
     const existingRoom = rooms.find(room => room.members.length === 2 && room.members.includes(user.uid) && room.members.includes(targetUser.uid));
     if (existingRoom) { setActiveRoom(existingRoom); return; }
-
-    const newRoomData = {
-      name: `與 ${targetUser.displayName} 的聊天`,
-      members: [user.uid, targetUser.uid],
-      createdAt: serverTimestamp(),
-    };
+    const newRoomData = { name: `與 ${targetUser.displayName} 的聊天`, members: [user.uid, targetUser.uid], createdAt: serverTimestamp() };
     const docRef = await addDoc(collection(db, "rooms"), newRoomData);
     setActiveRoom({ id: docRef.id, ...newRoomData });
   };
@@ -163,10 +148,7 @@ function App() {
     if (newMessage.trim() === "" || !activeRoom) return;
     const cleanText = newMessage.replace(/</g, "&lt;").replace(/>/g, "&gt;");
     await addDoc(collection(db, "rooms", activeRoom.id, "messages"), {
-      text: cleanText,
-      createdAt: serverTimestamp(),
-      uid: user.uid,
-      displayName: user.displayName || user.email,
+      text: cleanText, createdAt: serverTimestamp(), uid: user.uid, displayName: user.displayName || user.email,
     });
     setNewMessage("");
   };
@@ -176,7 +158,19 @@ function App() {
     try {
       if (isRegistering) {
         const res = await createUserWithEmailAndPassword(auth, email, password);
-        await updateProfile(res.user, { displayName: username });
+        // 註冊時立刻更新 Auth Profile
+        await updateProfile(res.user, { 
+          displayName: username,
+          photoURL: "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQX5yy5UXGD6VOurditkh6kO3et1ydkRMnzAw&s"
+        });
+        // 註冊時立刻寫入 Firestore 確保資料一致
+        await setDoc(doc(db, "users", res.user.uid), {
+          uid: res.user.uid,
+          displayName: username,
+          email: email,
+          photoURL: "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQX5yy5UXGD6VOurditkh6kO3et1ydkRMnzAw&s",
+          phone: "", address: ""
+        });
       } else {
         await signInWithEmailAndPassword(auth, email, password);
       }
@@ -200,7 +194,7 @@ function App() {
 
   return (
     <div style={{ display: "flex", height: "100vh", background: "#f0f2f5", fontFamily: "sans-serif" }}>
-      {/* User Profile Modal */}
+      {/* User Profile Modal (10%) */}
       {isProfileOpen && (
         <div className="modal-overlay">
           <div className="modal-content">
@@ -227,8 +221,8 @@ function App() {
       <div style={{ width: "300px", background: "#fff", borderRight: "1px solid #ddd", display: "flex", flexDirection: "column" }}>
         <div style={{ padding: "20px", borderBottom: "1px solid #ddd", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <div onClick={() => setIsProfileOpen(true)} style={{ cursor: "pointer", display: "flex", alignItems: "center", gap: "10px" }}>
-            <img src={user.photoURL || "https://via.placeholder.com/30"} style={{ width: "30px", height: "30px", borderRadius: "50%", objectFit: "cover" }} alt="me" />
-            <strong style={{ maxWidth: "150px", overflow: "hidden", textOverflow: "ellipsis" }}>{user.displayName}</strong>
+            <img src={profileData.photoURL} style={{ width: "30px", height: "30px", borderRadius: "50%", objectFit: "cover" }} alt="me" />
+            <strong style={{ maxWidth: "150px", overflow: "hidden", textOverflow: "ellipsis" }}>{profileData.displayName}</strong>
           </div>
           <button onClick={() => signOut(auth)} style={{ padding: "5px 10px", fontSize: "12px" }}>登出</button>
         </div>
@@ -252,7 +246,7 @@ function App() {
         </div>
       </div>
 
-      {/* 主聊天視窗 */}
+      {/* 聊天視窗 */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
         {activeRoom ? (
           <>
