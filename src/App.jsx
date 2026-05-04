@@ -102,7 +102,7 @@ function App() {
         <input 
           value={newMessage} 
           onChange={(e) => setNewMessage(e.target.value)} 
-          placeholder="輸入訊息..." 
+          placeholder="輸入訊息.." 
           style={{ flex: 1, padding: "10px" }}
         />
         <button type="submit" style={{ padding: "10px 20px" }}>傳送</button>
