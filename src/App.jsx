@@ -19,6 +19,8 @@ style.textContent = `
   .profile-input { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 5px; box-sizing: border-box; }
   .user-select-item { display: flex; align-items: center; justify-content: space-between; padding: 10px; border-bottom: 1px solid #eee; cursor: pointer; }
   .user-select-item:hover { background: #f0f7ff; }
+  .sidebar-avatar { width: 30px; height: 30px; border-radius: 50%; object-fit: cover; background: #eee; flex-shrink: 0; }
+  button:disabled { background: #ccc !important; cursor: not-allowed; }
 `;
 document.head.appendChild(style);
 
@@ -30,9 +32,10 @@ function App() {
   const [newMessage, setNewMessage] = useState("");
   const [allUsers, setAllUsers] = useState([]); 
   
-  // Modals States
+  // Modals & UX States
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [isInviteOpen, setIsInviteOpen] = useState(false);
+  const [addingIds, setAddingIds] = useState([]); // 新增：記錄正在加入群組的人，用於 Disable 按鈕
   const [profileData, setProfileData] = useState({ displayName: "", photoURL: "", email: "", phone: "", address: "" });
 
   const [email, setEmail] = useState("");
@@ -49,6 +52,11 @@ function App() {
         const userSnap = await getDoc(userRef);
         const dbData = userSnap.exists() ? userSnap.data() : {};
         const MY_DEFAULT_AVATAR = "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQX5yy5UXGD6VOurditkh6kO3et1ydkRMnzAw&s";
+        
+        if (!currentUser.photoURL) {
+          await updateProfile(currentUser, { photoURL: MY_DEFAULT_AVATAR });
+        }
+
         const initialData = {
           uid: currentUser.uid,
           displayName: dbData.displayName || currentUser.displayName || username || currentUser.email, 
@@ -60,22 +68,21 @@ function App() {
         setProfileData(initialData);
         setUser({ ...currentUser, displayName: initialData.displayName, photoURL: initialData.photoURL });
         await setDoc(userRef, initialData, { merge: true });
+        if (Notification.permission !== "granted") Notification.requestPermission();
       } else { setUser(null); }
     });
     return () => unsubscribe();
   }, [username]);
 
-  // 2. 獲取房間與使用者
+  // 2. 獲取房間與使用者同步
   useEffect(() => {
     if (!user) return;
     const q = query(collection(db, "rooms"), where("members", "array-contains", user.uid));
     const unsubscribeRooms = onSnapshot(q, (snapshot) => {
       const roomList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setRooms(roomList);
-      // 如果目前的房間被刪除(解散)，強制退出
       if (activeRoom && !roomList.some(r => r.id === activeRoom.id)) {
         setActiveRoom(null);
-        alert("該群組已被解散");
       }
     });
 
@@ -96,7 +103,7 @@ function App() {
     return () => unsubscribe();
   }, [activeRoom, user]);
 
-  // --- 關鍵邏輯：獲取好友列表 (已經有 1 對 1 聊天的人) ---
+  // 好友名單
   const getFriends = () => {
     const friendUids = rooms
       .filter(r => !r.isGroup && r.members.length === 2)
@@ -104,7 +111,6 @@ function App() {
     return allUsers.filter(u => friendUids.includes(u.uid));
   };
 
-  // 建立 1對1 好友關係
   const createFriendship = async (targetUser) => {
     const existing = rooms.find(r => !r.isGroup && r.members.length === 2 && r.members.includes(targetUser.uid));
     if (existing) { setActiveRoom(existing); return; }
@@ -113,7 +119,6 @@ function App() {
     setActiveRoom({ id: docRef.id, ...newRoom });
   };
 
-  // 建立群組
   const handleCreateGroup = async () => {
     const name = prompt("請輸入群組名稱:");
     if (!name) return;
@@ -122,19 +127,28 @@ function App() {
     setActiveRoom({ id: docRef.id, ...newGroup });
   };
 
-  // 解散群組 (Delete 5%)
   const dissolveGroup = async () => {
     if (!activeRoom || activeRoom.creator !== user.uid) return;
-    if (window.confirm("確定要解散此群組嗎？所有訊息將被永久刪除。")) {
+    if (window.confirm("確定要解散此群組嗎？")) {
       await deleteDoc(doc(db, "rooms", activeRoom.id));
     }
   };
 
-  // 邀請好友進入群組
+  // --- 優化：邀請按鈕加入 Disable 邏輯 ---
   const addFriendToGroup = async (friendUid) => {
-    await updateDoc(doc(db, "rooms", activeRoom.id), {
-      members: arrayUnion(friendUid)
-    });
+    if (addingIds.includes(friendUid)) return;
+    
+    setAddingIds(prev => [...prev, friendUid]); // 加入等待清單
+    try {
+      await updateDoc(doc(db, "rooms", activeRoom.id), {
+        members: arrayUnion(friendUid)
+      });
+      // 這裡不需要手動移除 addingIds，因為 Firebase 資料更新後，
+      // UI 會判斷 activeRoom.members.includes(f.uid) 而切換為「已在群組」。
+    } catch (e) {
+      alert("邀請失敗");
+      setAddingIds(prev => prev.filter(id => id !== friendUid)); // 失敗才移除，讓按鈕變回可點擊
+    }
   };
 
   const getRoomDisplayName = (room) => {
@@ -153,12 +167,24 @@ function App() {
     setNewMessage("");
   };
 
+  const handleSaveProfile = async () => {
+    try {
+      if (profileData.email !== user.email) await updateEmail(auth.currentUser, profileData.email);
+      await updateProfile(auth.currentUser, { displayName: profileData.displayName, photoURL: profileData.photoURL });
+      await updateDoc(doc(db, "users", user.uid), {
+        displayName: profileData.displayName, photoURL: profileData.photoURL, email: profileData.email, phone: profileData.phone, address: profileData.address
+      });
+      alert("更新成功！");
+      setIsProfileOpen(false);
+    } catch (e) { alert("儲存失敗: " + e.message); }
+  };
+
   const handleEmailAuth = async (e) => {
     e.preventDefault();
     try {
       if (isRegistering) {
         const res = await createUserWithEmailAndPassword(auth, email, password);
-        await updateProfile(res.user, { displayName: username });
+        await updateProfile(res.user, { displayName: username, photoURL: "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQX5yy5UXGD6VOurditkh6kO3et1ydkRMnzAw&s" });
         await setDoc(doc(db, "users", res.user.uid), { uid: res.user.uid, displayName: username, email: email, photoURL: "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQX5yy5UXGD6VOurditkh6kO3et1ydkRMnzAw&s", phone: "", address: "" });
       } else { await signInWithEmailAndPassword(auth, email, password); }
     } catch (error) { alert(error.message); }
@@ -167,42 +193,68 @@ function App() {
   if (!user) {
     return (
       <div style={{ maxWidth: "400px", margin: "100px auto", padding: "30px", border: "1px solid #ddd", borderRadius: "15px", textAlign: "center" }}>
-        <h2>{isRegistering ? "註冊" : "登入"}</h2>
+        <h2>Chatroom Login</h2>
         <form onSubmit={handleEmailAuth} style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
           {isRegistering && <input placeholder="暱稱" onChange={e => setUsername(e.target.value)} required style={{ padding: "10px" }} />}
           <input placeholder="Email" onChange={e => setEmail(e.target.value)} required style={{ padding: "10px" }} />
           <input type="password" placeholder="密碼" onChange={e => setPassword(e.target.value)} required style={{ padding: "10px" }} />
-          <button type="submit" style={{ padding: "10px", background: "#4caf50", color: "#fff", border: "none", borderRadius: "5px" }}>立即</button>
+          <button type="submit" style={{ padding: "10px", background: "#4caf50", color: "#fff", border: "none", borderRadius: "5px", cursor: "pointer" }}>確認</button>
         </form>
-        <button onClick={() => setIsRegistering(!isRegistering)} style={{ marginTop: "15px", background: "none", border: "none", color: "blue", cursor: "pointer" }}>切換模式</button>
+        <button onClick={() => setIsRegistering(!isRegistering)} style={{ marginTop: "15px", background: "none", border: "none", color: "blue", cursor: "pointer" }}>
+          {isRegistering ? "已有帳號？登入" : "還沒帳號？註冊"}
+        </button>
       </div>
     );
   }
 
   return (
     <div style={{ display: "flex", height: "100vh", background: "#f0f2f5", fontFamily: "sans-serif" }}>
-      {/* 好友邀請 Modal */}
+      {/* 邀請 Modal */}
       {isInviteOpen && (
         <div className="modal-overlay">
           <div className="modal-content">
-            <h3 style={{ display: "flex", justifyContent: "space-between" }}>
-              邀請好友加入
-              <button onClick={() => setIsInviteOpen(false)} style={{ border: "none", background: "none", cursor: "pointer" }}>✕</button>
-            </h3>
-            <p style={{ fontSize: "12px", color: "#666" }}>僅顯示已建立 1 對 1 關係的好友</p>
-            {getFriends().map(f => (
-              <div key={f.uid} className="user-select-item">
-                <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-                  <img src={f.photoURL} style={{ width: "30px", height: "30px", borderRadius: "50%" }} />
-                  <span>{f.displayName}</span>
+            <h3 style={{ display: "flex", justifyContent: "space-between" }}>邀請好友 <button onClick={() => {setIsInviteOpen(false); setAddingIds([]);}} style={{ border: "none", background: "none", cursor: "pointer" }}>✕</button></h3>
+            {getFriends().length === 0 && <p style={{ color: "#999" }}>您目前沒有好友</p>}
+            {getFriends().map(f => {
+              const isAlreadyIn = activeRoom.members.includes(f.uid);
+              const isBeingAdded = addingIds.includes(f.uid);
+              
+              return (
+                <div key={f.uid} className="user-select-item">
+                  <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                    <img src={f.photoURL} className="sidebar-avatar" />
+                    <span>{f.displayName}</span>
+                  </div>
+                  
+                  {isAlreadyIn ? (
+                    <span style={{ color: "#22c55e", fontSize: "12px", fontWeight: "bold" }}>已在群組</span>
+                  ) : (
+                    <button 
+                      onClick={() => addFriendToGroup(f.uid)} 
+                      disabled={isBeingAdded}
+                      style={{ padding: "5px 15px", background: isBeingAdded ? "#ccc" : "#0084ff", color: "white", border: "none", borderRadius: "5px", cursor: "pointer" }}
+                    >
+                      {isBeingAdded ? "正在加入..." : "邀請"}
+                    </button>
+                  )}
                 </div>
-                {activeRoom.members.includes(f.uid) ? (
-                  <span style={{ color: "#22c55e", fontSize: "12px" }}>已在群組中</span>
-                ) : (
-                  <button onClick={() => addFriendToGroup(f.uid)} style={{ padding: "5px 10px", background: "#0084ff", color: "white", border: "none", borderRadius: "5px", cursor: "pointer" }}>邀請</button>
-                )}
-              </div>
-            ))}
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Profile Modal */}
+      {isProfileOpen && (
+        <div className="modal-overlay">
+          <div className="modal-content">
+            <h3>個人資料</h3>
+            <label>頭像網址:</label> <input className="profile-input" value={profileData.photoURL} onChange={e => setProfileData({...profileData, photoURL: e.target.value})} />
+            <label>暱稱:</label> <input className="profile-input" value={profileData.displayName} onChange={e => setProfileData({...profileData, displayName: e.target.value})} />
+            <label>Email:</label> <input className="profile-input" value={profileData.email} onChange={e => setProfileData({...profileData, email: e.target.value})} />
+            <label>電話:</label> <input className="profile-input" value={profileData.phone} onChange={e => setProfileData({...profileData, phone: e.target.value})} />
+            <label>地址:</label> <input className="profile-input" value={profileData.address} onChange={e => setProfileData({...profileData, address: e.target.value})} />
+            <div style={{ display: "flex", gap: "10px" }}><button onClick={handleSaveProfile} style={{ flex: 1, padding: "10px", background: "#0084ff", color: "white", border: "none", borderRadius: "5px", cursor: "pointer" }}>儲存</button><button onClick={() => setIsProfileOpen(false)} style={{ flex: 1, padding: "10px", background: "#eee", border: "none", borderRadius: "5px", cursor: "pointer" }}>取消</button></div>
           </div>
         </div>
       )}
@@ -211,16 +263,15 @@ function App() {
       <div style={{ width: "300px", background: "#fff", borderRight: "1px solid #ddd", display: "flex", flexDirection: "column" }}>
         <div style={{ padding: "20px", borderBottom: "1px solid #ddd", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <div onClick={() => setIsProfileOpen(true)} style={{ cursor: "pointer", display: "flex", alignItems: "center", gap: "10px" }}>
-            <img src={profileData.photoURL} style={{ width: "30px", height: "30px", borderRadius: "50%", objectFit: "cover" }} />
+            <img src={profileData.photoURL} className="sidebar-avatar" />
             <strong style={{ maxWidth: "120px", overflow: "hidden", textOverflow: "ellipsis" }}>{profileData.displayName}</strong>
           </div>
-          <button onClick={() => signOut(auth)} style={{ padding: "5px 10px", fontSize: "12px" }}>登出</button>
+          <button onClick={() => signOut(auth)} style={{ padding: "5px 10px", fontSize: "12px", cursor: "pointer" }}>登出</button>
         </div>
         
         <div style={{ flex: 1, overflowY: "auto" }}>
           <div style={{ padding: "10px 20px", background: "#f8f9fa", fontSize: "13px", color: "#666", fontWeight: "bold", display: "flex", justifyContent: "space-between" }}>
-            <span>聊天室</span>
-            <button onClick={handleCreateGroup} style={{ border: "none", background: "none", cursor: "pointer" }}>👥+</button>
+            <span>聊天室</span> <button onClick={handleCreateGroup} style={{ border: "none", background: "none", cursor: "pointer", fontSize: "16px" }}>👥+</button>
           </div>
           {rooms.map(room => (
             <div key={room.id} onClick={() => setActiveRoom(room)} style={{ padding: "15px 20px", cursor: "pointer", background: activeRoom?.id === room.id ? "#e6f2ff" : "none", borderBottom: "1px solid #eee" }}>
@@ -230,14 +281,18 @@ function App() {
           
           <div style={{ padding: "10px 20px", background: "#f8f9fa", fontSize: "13px", color: "#666", fontWeight: "bold", marginTop: "10px" }}>發現新使用者</div>
           {allUsers.filter(u => u.uid !== user.uid && !rooms.some(r => !r.isGroup && r.members.includes(u.uid))).map(u => (
-            <div key={u.uid} onClick={() => createFriendship(u)} style={{ padding: "12px 20px", cursor: "pointer", fontSize: "14px", borderBottom: "1px solid #eee", display: "flex", justifyContent: "space-between" }}>
-              <span>{u.displayName}</span><span>➕</span>
+            <div key={u.uid} onClick={() => createFriendship(u)} style={{ padding: "12px 20px", cursor: "pointer", fontSize: "14px", borderBottom: "1px solid #eee", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                <img src={u.photoURL || "https://via.placeholder.com/30"} className="sidebar-avatar" />
+                <span>{u.displayName}</span>
+              </div>
+              <span style={{ color: "#0084ff" }}>➕</span>
             </div>
           ))}
         </div>
       </div>
 
-      {/* 聊天主窗 */}
+      {/* 主窗 */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
         {activeRoom ? (
           <>
@@ -247,9 +302,7 @@ function App() {
                 {activeRoom.isGroup && (
                   <>
                     <button onClick={() => setIsInviteOpen(true)} style={{ padding: "8px 15px", borderRadius: "5px", border: "1px solid #0084ff", color: "#0084ff", background: "#fff", cursor: "pointer" }}>邀請好友</button>
-                    {activeRoom.creator === user.uid && (
-                      <button onClick={dissolveGroup} style={{ padding: "8px 15px", borderRadius: "5px", border: "1px solid #ef4444", color: "#ef4444", background: "#fff", cursor: "pointer" }}>解散群組</button>
-                    )}
+                    {activeRoom.creator === user.uid && <button onClick={dissolveGroup} style={{ padding: "8px 15px", borderRadius: "5px", border: "1px solid #ef4444", color: "#ef4444", background: "#fff", cursor: "pointer" }}>解散群組</button>}
                   </>
                 )}
               </div>
@@ -258,20 +311,18 @@ function App() {
               {messages.map(msg => (
                 <div key={msg.id} style={{ textAlign: msg.uid === user.uid ? "right" : "left", margin: "15px 0" }}>
                   <div style={{ fontSize: "11px", color: "#888", marginBottom: "4px" }}>{msg.displayName}</div>
-                  <div className="message-bubble" style={{ display: "inline-block", padding: "10px 15px", borderRadius: "18px", background: msg.uid === user.uid ? "#0084ff" : "#e4e6eb", color: msg.uid === user.uid ? "#fff" : "#000", maxWidth: "250px", wordBreak: "break-word", textAlign: "left" }}>
-                    {msg.text}
-                  </div>
+                  <div className="message-bubble" style={{ display: "inline-block", padding: "10px 15px", borderRadius: "18px", background: msg.uid === user.uid ? "#0084ff" : "#e4e6eb", color: msg.uid === user.uid ? "#fff" : "#000", maxWidth: "250px", wordBreak: "break-word", textAlign: "left" }}>{msg.text}</div>
                 </div>
               ))}
               <div ref={scrollRef}></div>
             </main>
             <form onSubmit={sendMessage} style={{ padding: "20px", background: "#fff", borderTop: "1px solid #ddd", display: "flex" }}>
               <input value={newMessage} onChange={e => setNewMessage(e.target.value)} placeholder="輸入訊息..." style={{ flex: 1, padding: "12px 20px", borderRadius: "25px", border: "1px solid #ddd", outline: "none" }} />
-              <button type="submit" style={{ marginLeft: "10px", padding: "10px 25px", background: "#0084ff", color: "#fff", border: "none", borderRadius: "25px", cursor: "pointer" }}>傳送</button>
+              <button type="submit" style={{ marginLeft: "10px", padding: "10px 25px", background: "#0084ff", color: "#fff", border: "none", borderRadius: "25px", cursor: "pointer", fontWeight: "bold" }}>傳送</button>
             </form>
           </>
         ) : (
-          <div style={{ margin: "auto", color: "#999", textAlign: "center" }}><h3>請選擇好友或點擊 👥+ 創立群組</h3></div>
+          <div style={{ margin: "auto", color: "#999", textAlign: "center" }}><h3>請選擇聊天室或點擊 👥+ 發起群組</h3></div>
         )}
       </div>
     </div>
