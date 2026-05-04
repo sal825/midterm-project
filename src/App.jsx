@@ -6,7 +6,7 @@ import {
 } from "firebase/auth";
 import { 
   collection, addDoc, query, orderBy, onSnapshot, serverTimestamp, 
-  where, getDocs, doc, updateDoc, arrayUnion, setDoc, getDoc, deleteDoc
+  where, getDocs, doc, updateDoc, arrayUnion, setDoc, getDoc, deleteDoc, limit
 } from "firebase/firestore";
 
 // --- CSS 樣式 ---
@@ -19,7 +19,7 @@ style.textContent = `
   .profile-input { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 5px; box-sizing: border-box; }
   .user-select-item { display: flex; align-items: center; justify-content: space-between; padding: 10px; border-bottom: 1px solid #eee; cursor: pointer; }
   .user-select-item:hover { background: #f0f7ff; }
-  .sidebar-avatar { width: 30px; height: 30px; border-radius: 50%; object-fit: cover; background: #eee; flex-shrink: 0; }
+  .sidebar-avatar { width: 40px; height: 40px; border-radius: 50%; object-fit: cover; background: #eee; flex-shrink: 0; }
   button:disabled { background: #ccc !important; cursor: not-allowed; }
 `;
 document.head.appendChild(style);
@@ -32,17 +32,24 @@ function App() {
   const [newMessage, setNewMessage] = useState("");
   const [allUsers, setAllUsers] = useState([]); 
   
-  // Modals & UX States
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [isInviteOpen, setIsInviteOpen] = useState(false);
-  const [addingIds, setAddingIds] = useState([]); // 新增：記錄正在加入群組的人，用於 Disable 按鈕
+  const [addingIds, setAddingIds] = useState([]); 
   const [profileData, setProfileData] = useState({ displayName: "", photoURL: "", email: "", phone: "", address: "" });
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [username, setUsername] = useState(""); 
   const [isRegistering, setIsRegistering] = useState(false);
+  
   const scrollRef = useRef();
+  const activeRoomRef = useRef(null); // 用於在非同步中獲取最新的 activeRoom
+
+  const MY_DEFAULT_AVATAR = "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQX5yy5UXGD6VOurditkh6kO3et1ydkRMnzAw&s";
+  const GROUP_DEFAULT_AVATAR = "https://cdn-icons-png.flaticon.com/512/615/615075.png";
+
+  // 更新 Ref 以便通知判斷
+  useEffect(() => { activeRoomRef.current = activeRoom; }, [activeRoom]);
 
   // 1. 登入監聽
   useEffect(() => {
@@ -51,7 +58,6 @@ function App() {
         const userRef = doc(db, "users", currentUser.uid);
         const userSnap = await getDoc(userRef);
         const dbData = userSnap.exists() ? userSnap.data() : {};
-        const MY_DEFAULT_AVATAR = "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQX5yy5UXGD6VOurditkh6kO3et1ydkRMnzAw&s";
         
         if (!currentUser.photoURL) {
           await updateProfile(currentUser, { photoURL: MY_DEFAULT_AVATAR });
@@ -68,7 +74,11 @@ function App() {
         setProfileData(initialData);
         setUser({ ...currentUser, displayName: initialData.displayName, photoURL: initialData.photoURL });
         await setDoc(userRef, initialData, { merge: true });
-        if (Notification.permission !== "granted") Notification.requestPermission();
+
+        // 請求通知權限
+        if (Notification.permission === "default") {
+          Notification.requestPermission();
+        }
       } else { setUser(null); }
     });
     return () => unsubscribe();
@@ -81,43 +91,95 @@ function App() {
     const unsubscribeRooms = onSnapshot(q, (snapshot) => {
       const roomList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setRooms(roomList);
-      if (activeRoom && !roomList.some(r => r.id === activeRoom.id)) {
-        setActiveRoom(null);
-      }
     });
 
     const unsubscribeUsers = onSnapshot(collection(db, "users"), (snapshot) => {
       setAllUsers(snapshot.docs.map(doc => doc.data()));
     });
     return () => { unsubscribeRooms(); unsubscribeUsers(); };
-  }, [user, activeRoom]);
+  }, [user]);
 
-  
-  // 3. 訊息監聽與通知邏輯
+  // 3. 訊息通知系統 (核心修改)
+  useEffect(() => {
+    if (!user || rooms.length === 0) return;
+
+    const listeners = rooms.map(room => {
+      const q = query(
+        collection(db, "rooms", room.id, "messages"),
+        orderBy("createdAt", "desc"),
+        limit(1)
+      );
+
+      let isFirstLoad = true; // 避免一開始就把舊訊息當成新訊息跳通知
+
+      return onSnapshot(q, (snapshot) => {
+        if (isFirstLoad) {
+          isFirstLoad = false;
+          return;
+        }
+
+        snapshot.docChanges().forEach((change) => {
+          if (change.type === "added") {
+            const msgData = change.doc.data();
+            
+            // 判斷是否需要發送通知：
+            // 1. 不是自己傳的
+            // 2. 當前不是在看這個聊天室
+            // 3. 訊息不是空的
+            if (msgData.uid !== user.uid && activeRoomRef.current?.id !== room.id) {
+              sendBrowserNotification(room, msgData);
+            }
+          }
+        });
+      });
+    });
+
+    return () => listeners.forEach(unsub => unsub());
+  }, [rooms, user]);
+
+  // 4. 當前選中房間的訊息顯示
   useEffect(() => {
     if (!activeRoom || !user) return;
     const q = query(collection(db, "rooms", activeRoom.id, "messages"), orderBy("createdAt", "asc"));
-    
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      const newMessages = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      
-      // 檢查最後一條訊息是否由他人發送，且是新產生的 (snapshot.metadata.hasPendingWrites 為 false 代表來自 Server)
-      const lastMsg = newMessages[newMessages.length - 1];
-      if (lastMsg && lastMsg.uid !== user.uid && !snapshot.metadata.hasPendingWrites) {
-        if (Notification.permission === "granted") {
-          new Notification(`來自 ${lastMsg.displayName} 的新訊息`, {
-            body: lastMsg.text,
-            icon: "你的App圖標URL"
-          });
-        }
-      }
-      
-      setMessages(newMessages);
+      setMessages(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
       setTimeout(() => scrollRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
     });
     return () => unsubscribe();
   }, [activeRoom, user]);
-  // 好友名單
+
+  // --- 輔助函式 ---
+  const sendBrowserNotification = (room, msg) => {
+    if (Notification.permission === "granted") {
+      const title = room.isGroup ? `[群組] ${room.name}` : `來自 ${msg.displayName} 的訊息`;
+      const options = {
+        body: msg.text,
+        icon: room.isGroup ? GROUP_DEFAULT_AVATAR : (allUsers.find(u => u.uid === msg.uid)?.photoURL || MY_DEFAULT_AVATAR),
+        silent: false
+      };
+      const n = new Notification(title, options);
+      n.onclick = () => {
+        window.focus();
+        setActiveRoom(room);
+      };
+    }
+  };
+
+  const getRoomDisplayName = (room) => {
+    if (room.isGroup) return `👥 ${room.name}`;
+    const otherId = room.members.find(uid => uid !== user.uid);
+    const otherUser = allUsers.find(u => u.uid === otherId);
+    return otherUser ? otherUser.displayName : "未知好友";
+  };
+
+  const getRoomDisplayAvatar = (room) => {
+    if (room.isGroup) return GROUP_DEFAULT_AVATAR;
+    const otherId = room.members.find(uid => uid !== user.uid);
+    const otherUser = allUsers.find(u => u.uid === otherId);
+    return otherUser ? otherUser.photoURL : MY_DEFAULT_AVATAR;
+  };
+
+  // ... (其餘邏輯 handleCreateGroup, createFriendship, sendMessage 等保持不變)
   const getFriends = () => {
     const friendUids = rooms
       .filter(r => !r.isGroup && r.members.length === 2)
@@ -148,28 +210,15 @@ function App() {
     }
   };
 
-  // --- 優化：邀請按鈕加入 Disable 邏輯 ---
   const addFriendToGroup = async (friendUid) => {
     if (addingIds.includes(friendUid)) return;
-    
-    setAddingIds(prev => [...prev, friendUid]); // 加入等待清單
+    setAddingIds(prev => [...prev, friendUid]);
     try {
-      await updateDoc(doc(db, "rooms", activeRoom.id), {
-        members: arrayUnion(friendUid)
-      });
-      // 這裡不需要手動移除 addingIds，因為 Firebase 資料更新後，
-      // UI 會判斷 activeRoom.members.includes(f.uid) 而切換為「已在群組」。
+      await updateDoc(doc(db, "rooms", activeRoom.id), { members: arrayUnion(friendUid) });
     } catch (e) {
       alert("邀請失敗");
-      setAddingIds(prev => prev.filter(id => id !== friendUid)); // 失敗才移除，讓按鈕變回可點擊
+      setAddingIds(prev => prev.filter(id => id !== friendUid));
     }
-  };
-
-  const getRoomDisplayName = (room) => {
-    if (room.isGroup) return `👥 ${room.name}`;
-    const otherId = room.members.find(uid => uid !== user.uid);
-    const otherUser = allUsers.find(u => u.uid === otherId);
-    return otherUser ? otherUser.displayName : "未知好友";
   };
 
   const sendMessage = async (e) => {
@@ -198,8 +247,8 @@ function App() {
     try {
       if (isRegistering) {
         const res = await createUserWithEmailAndPassword(auth, email, password);
-        await updateProfile(res.user, { displayName: username, photoURL: "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQX5yy5UXGD6VOurditkh6kO3et1ydkRMnzAw&s" });
-        await setDoc(doc(db, "users", res.user.uid), { uid: res.user.uid, displayName: username, email: email, photoURL: "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQX5yy5UXGD6VOurditkh6kO3et1ydkRMnzAw&s", phone: "", address: "" });
+        await updateProfile(res.user, { displayName: username, photoURL: MY_DEFAULT_AVATAR });
+        await setDoc(doc(db, "users", res.user.uid), { uid: res.user.uid, displayName: username, email: email, photoURL: MY_DEFAULT_AVATAR, phone: "", address: "" });
       } else { await signInWithEmailAndPassword(auth, email, password); }
     } catch (error) { alert(error.message); }
   };
@@ -232,14 +281,12 @@ function App() {
             {getFriends().map(f => {
               const isAlreadyIn = activeRoom.members.includes(f.uid);
               const isBeingAdded = addingIds.includes(f.uid);
-              
               return (
                 <div key={f.uid} className="user-select-item">
                   <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-                    <img src={f.photoURL} className="sidebar-avatar" />
+                    <img src={f.photoURL} className="sidebar-avatar" style={{ width: "30px", height: "30px" }} />
                     <span>{f.displayName}</span>
                   </div>
-                  
                   {isAlreadyIn ? (
                     <span style={{ color: "#22c55e", fontSize: "12px", fontWeight: "bold" }}>已在群組</span>
                   ) : (
@@ -274,11 +321,11 @@ function App() {
       )}
 
       {/* 側邊欄 */}
-      <div style={{ width: "300px", background: "#fff", borderRight: "1px solid #ddd", display: "flex", flexDirection: "column" }}>
+      <div style={{ width: "320px", background: "#fff", borderRight: "1px solid #ddd", display: "flex", flexDirection: "column" }}>
         <div style={{ padding: "20px", borderBottom: "1px solid #ddd", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <div onClick={() => setIsProfileOpen(true)} style={{ cursor: "pointer", display: "flex", alignItems: "center", gap: "10px" }}>
-            <img src={profileData.photoURL} className="sidebar-avatar" />
-            <strong style={{ maxWidth: "120px", overflow: "hidden", textOverflow: "ellipsis" }}>{profileData.displayName}</strong>
+            <img src={profileData.photoURL} className="sidebar-avatar" style={{ width: "35px", height: "35px" }} />
+            <strong style={{ maxWidth: "120px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{profileData.displayName}</strong>
           </div>
           <button onClick={() => signOut(auth)} style={{ padding: "5px 10px", fontSize: "12px", cursor: "pointer" }}>登出</button>
         </div>
@@ -288,8 +335,23 @@ function App() {
             <span>聊天室</span> <button onClick={handleCreateGroup} style={{ border: "none", background: "none", cursor: "pointer", fontSize: "16px" }}>👥+</button>
           </div>
           {rooms.map(room => (
-            <div key={room.id} onClick={() => setActiveRoom(room)} style={{ padding: "15px 20px", cursor: "pointer", background: activeRoom?.id === room.id ? "#e6f2ff" : "none", borderBottom: "1px solid #eee" }}>
-              {getRoomDisplayName(room)}
+            <div 
+              key={room.id} 
+              onClick={() => setActiveRoom(room)} 
+              style={{ 
+                padding: "12px 20px", 
+                cursor: "pointer", 
+                background: activeRoom?.id === room.id ? "#e6f2ff" : "none", 
+                borderBottom: "1px solid #eee",
+                display: "flex",
+                alignItems: "center",
+                gap: "12px"
+              }}
+            >
+              <img src={getRoomDisplayAvatar(room)} className="sidebar-avatar" />
+              <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {getRoomDisplayName(room)}
+              </span>
             </div>
           ))}
           
@@ -297,7 +359,7 @@ function App() {
           {allUsers.filter(u => u.uid !== user.uid && !rooms.some(r => !r.isGroup && r.members.includes(u.uid))).map(u => (
             <div key={u.uid} onClick={() => createFriendship(u)} style={{ padding: "12px 20px", cursor: "pointer", fontSize: "14px", borderBottom: "1px solid #eee", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-                <img src={u.photoURL || "https://via.placeholder.com/30"} className="sidebar-avatar" />
+                <img src={u.photoURL || MY_DEFAULT_AVATAR} className="sidebar-avatar" />
                 <span>{u.displayName}</span>
               </div>
               <span style={{ color: "#0084ff" }}>➕</span>
@@ -306,12 +368,15 @@ function App() {
         </div>
       </div>
 
-      {/* 主窗 */}
+      {/* 主視窗 */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
         {activeRoom ? (
           <>
             <header style={{ padding: "15px 25px", background: "#fff", borderBottom: "1px solid #ddd", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span style={{ fontWeight: "bold", fontSize: "18px" }}>{getRoomDisplayName(activeRoom)}</span>
+              <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                <img src={getRoomDisplayAvatar(activeRoom)} className="sidebar-avatar" style={{ width: "35px", height: "35px" }} />
+                <span style={{ fontWeight: "bold", fontSize: "18px" }}>{getRoomDisplayName(activeRoom)}</span>
+              </div>
               <div style={{ display: "flex", gap: "10px" }}>
                 {activeRoom.isGroup && (
                   <>
