@@ -92,17 +92,31 @@ function App() {
     return () => { unsubscribeRooms(); unsubscribeUsers(); };
   }, [user, activeRoom]);
 
-  // 3. 訊息監聽
+  
+  // 3. 訊息監聽與通知邏輯
   useEffect(() => {
     if (!activeRoom || !user) return;
     const q = query(collection(db, "rooms", activeRoom.id, "messages"), orderBy("createdAt", "asc"));
+    
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      setMessages(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+      const newMessages = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      
+      // 檢查最後一條訊息是否由他人發送，且是新產生的 (snapshot.metadata.hasPendingWrites 為 false 代表來自 Server)
+      const lastMsg = newMessages[newMessages.length - 1];
+      if (lastMsg && lastMsg.uid !== user.uid && !snapshot.metadata.hasPendingWrites) {
+        if (Notification.permission === "granted") {
+          new Notification(`來自 ${lastMsg.displayName} 的新訊息`, {
+            body: lastMsg.text,
+            icon: "你的App圖標URL"
+          });
+        }
+      }
+      
+      setMessages(newMessages);
       setTimeout(() => scrollRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
     });
     return () => unsubscribe();
   }, [activeRoom, user]);
-
   // 好友名單
   const getFriends = () => {
     const friendUids = rooms
