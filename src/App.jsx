@@ -11,11 +11,11 @@ import {
 
 function App() {
   const [user, setUser] = useState(null);
-  const [rooms, setRooms] = useState([]); // 我加入的房間列表
-  const [activeRoom, setActiveRoom] = useState(null); // 目前選中的房間
+  const [rooms, setRooms] = useState([]); 
+  const [activeRoom, setActiveRoom] = useState(null); 
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState("");
-  const [allUsers, setAllUsers] = useState([]); // 系統內所有使用者 (用於邀請)
+  const [allUsers, setAllUsers] = useState([]); 
   
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -23,12 +23,11 @@ function App() {
   const [isRegistering, setIsRegistering] = useState(false);
   const scrollRef = useRef();
 
-  // 1. 監聽登入狀態
+  // 1. 監聽登入狀態並更新個人資料至資料庫
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
       if (currentUser) {
-        // 登入後將自己資訊存入 users 集合，方便別人邀請
         setDoc(doc(db, "users", currentUser.uid), {
           uid: currentUser.uid,
           displayName: currentUser.displayName || currentUser.email,
@@ -39,7 +38,7 @@ function App() {
     return () => unsubscribe();
   }, []);
 
-  // 2. 獲取我參與的房間 (根據 members 欄位含有我的 UID)
+  // 2. 獲取我參與的房間
   useEffect(() => {
     if (!user) return;
     const q = query(collection(db, "rooms"), where("members", "array-contains", user.uid));
@@ -49,7 +48,7 @@ function App() {
     return () => unsubscribe();
   }, [user]);
 
-  // 3. 獲取目前房間的訊息 (歷史紀錄)
+  // 3. 獲取目前選中房間的訊息
   useEffect(() => {
     if (!activeRoom) return;
     const q = query(collection(db, "rooms", activeRoom.id, "messages"), orderBy("createdAt", "asc"));
@@ -60,27 +59,52 @@ function App() {
     return () => unsubscribe();
   }, [activeRoom]);
 
-  // 4. 獲取所有使用者列表 (用於發起聊天)
+  // 4. 獲取系統內所有使用者 (用於動態顯示名稱與發起聊天)
   useEffect(() => {
     if (!user) return;
     const fetchUsers = async () => {
       const snapshot = await getDocs(collection(db, "users"));
-      setAllUsers(snapshot.docs.map(doc => doc.data()).filter(u => u.uid !== user.uid));
+      setAllUsers(snapshot.docs.map(doc => doc.data())); // 這裡存入所有人，不 filter 掉自己
     };
     fetchUsers();
   }, [user]);
 
-  // 功能：建立新房間 (私訊)
-  const createRoom = async (targetUser) => {
-    const roomName = `與 ${targetUser.displayName} 的聊天`;
-    await addDoc(collection(db, "rooms"), {
-      name: roomName,
-      members: [user.uid, targetUser.uid],
-      createdAt: serverTimestamp(),
-    });
+  // --- 關鍵修改：動態取得房間顯示名稱 ---
+  const getRoomDisplayName = (room) => {
+    if (!room) return "";
+    // 如果是 1 對 1 私訊 (成員剛好 2 人)
+    if (room.members && room.members.length === 2) {
+      const otherId = room.members.find(uid => uid !== user.uid);
+      const otherUser = allUsers.find(u => u.uid === otherId);
+      return otherUser ? `與 ${otherUser.displayName} 的聊天` : "載入中...";
+    }
+    // 如果是群組聊天
+    return room.name || "群組聊天";
   };
 
-  // 功能：邀請新成員 (群組邏輯)
+  // 建立新房間邏輯
+  const createRoom = async (targetUser) => {
+    const existingRoom = rooms.find(room => 
+      room.members.length === 2 && 
+      room.members.includes(user.uid) && 
+      room.members.includes(targetUser.uid)
+    );
+
+    if (existingRoom) {
+      setActiveRoom(existingRoom);
+      return;
+    }
+
+    const newRoomData = {
+      name: `與 ${targetUser.displayName} 的聊天`, // 初始名稱，但顯示時會被動態計算取代
+      members: [user.uid, targetUser.uid],
+      createdAt: serverTimestamp(),
+    };
+
+    const docRef = await addDoc(collection(db, "rooms"), newRoomData);
+    setActiveRoom({ id: docRef.id, ...newRoomData });
+  };
+
   const inviteMember = async () => {
     const targetEmail = prompt("請輸入要邀請的成員 Email:");
     if (!targetEmail || !activeRoom) return;
@@ -127,41 +151,58 @@ function App() {
       <div style={{ maxWidth: "400px", margin: "100px auto", padding: "30px", border: "1px solid #ddd", borderRadius: "15px", textAlign: "center" }}>
         <h2>{isRegistering ? "註冊" : "登入"}</h2>
         <form onSubmit={handleEmailAuth} style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-          {isRegistering && <input placeholder="暱稱" onChange={e => setUsername(e.target.value)} required />}
-          <input placeholder="Gmail" onChange={e => setEmail(e.target.value)} required />
-          <input type="password" placeholder="密碼" onChange={e => setPassword(e.target.value)} required />
-          <button type="submit">{isRegistering ? "註冊" : "登入"}</button>
+          {isRegistering && <input placeholder="暱稱" onChange={e => setUsername(e.target.value)} required style={{ padding: "10px" }} />}
+          <input placeholder="Gmail" onChange={e => setEmail(e.target.value)} required style={{ padding: "10px" }} />
+          <input type="password" placeholder="密碼" onChange={e => setPassword(e.target.value)} required style={{ padding: "10px" }} />
+          <button type="submit" style={{ padding: "10px", background: "#4caf50", color: "#fff", border: "none", borderRadius: "5px" }}>
+            {isRegistering ? "立即註冊" : "立即登入"}
+          </button>
         </form>
-        <button onClick={() => setIsRegistering(!isRegistering)} style={{ marginTop: "10px", background: "none", border: "none", color: "blue" }}>
-          切換至 {isRegistering ? "登入" : "註冊"}
+        <button onClick={() => setIsRegistering(!isRegistering)} style={{ marginTop: "15px", background: "none", border: "none", color: "blue", cursor: "pointer" }}>
+          {isRegistering ? "已有帳號？返回登入" : "還沒有帳號？按此註冊"}
         </button>
       </div>
     );
   }
 
   return (
-    <div style={{ display: "flex", height: "100vh", background: "#f0f2f5" }}>
-      {/* 側邊欄：房間列表與好友列表 */}
+    <div style={{ display: "flex", height: "100vh", background: "#f0f2f5", fontFamily: "sans-serif" }}>
+      {/* 側邊欄 */}
       <div style={{ width: "300px", background: "#fff", borderRight: "1px solid #ddd", display: "flex", flexDirection: "column" }}>
-        <div style={{ padding: "20px", borderBottom: "1px solid #ddd" }}>
-          <strong>{user.displayName}</strong> <button onClick={() => signOut(auth)}>登出</button>
+        <div style={{ padding: "20px", borderBottom: "1px solid #ddd", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <strong>{user.displayName}</strong> 
+          <button onClick={() => signOut(auth)} style={{ padding: "5px 10px", fontSize: "12px" }}>登出</button>
         </div>
         
         <div style={{ flex: 1, overflowY: "auto" }}>
-          <div style={{ padding: "10px", background: "#eee" }}>我的聊天室</div>
+          <div style={{ padding: "10px 20px", background: "#f8f9fa", fontSize: "13px", color: "#666", fontWeight: "bold" }}>我的聊天室</div>
           {rooms.map(room => (
             <div key={room.id} onClick={() => setActiveRoom(room)} 
-                 style={{ padding: "15px", cursor: "pointer", background: activeRoom?.id === room.id ? "#e6f2ff" : "none", borderBottom: "1px solid #eee" }}>
-              {room.name}
+                 style={{ padding: "15px 20px", cursor: "pointer", background: activeRoom?.id === room.id ? "#e6f2ff" : "none", borderBottom: "1px solid #eee", transition: "0.2s" }}>
+              {/* 使用動態顯示名稱 */}
+              {getRoomDisplayName(room)}
             </div>
           ))}
           
-          <div style={{ padding: "10px", background: "#eee" }}>發起新聊天 (所有使用者)</div>
-          {allUsers.map(u => (
-            <div key={u.uid} onClick={() => createRoom(u)} style={{ padding: "10px", cursor: "pointer", fontSize: "14px", borderBottom: "1px solid #eee" }}>
-              ➕ {u.displayName}
-            </div>
-          ))}
+          <div style={{ padding: "10px 20px", background: "#f8f9fa", fontSize: "13px", color: "#666", fontWeight: "bold", marginTop: "10px" }}>
+            發起新聊天
+          </div>
+          {allUsers
+            .filter(u => {
+              // 1. 過濾掉自己
+              if (u.uid === user.uid) return false;
+              // 2. 過濾掉已經有 1 對 1 房間的人
+              const alreadyHasRoom = rooms.some(r => r.members.length === 2 && r.members.includes(u.uid));
+              return !alreadyHasRoom;
+            })
+            .map(u => (
+              <div key={u.uid} onClick={() => createRoom(u)} 
+                  style={{ padding: "12px 20px", cursor: "pointer", fontSize: "14px", borderBottom: "1px solid #eee", display: "flex", justifyContent: "space-between" }}>
+                <span>{u.displayName}</span>
+                <span style={{ color: "#0084ff" }}>➕</span>
+              </div>
+            ))
+          }
         </div>
       </div>
 
@@ -169,16 +210,29 @@ function App() {
       <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
         {activeRoom ? (
           <>
-            <header style={{ padding: "15px", background: "#fff", borderBottom: "1px solid #ddd", display: "flex", justifyContent: "space-between" }}>
-              <strong>{activeRoom.name}</strong>
-              <button onClick={inviteMember}>邀請成員加入房間</button>
+            <header style={{ padding: "15px 25px", background: "#fff", borderBottom: "1px solid #ddd", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ fontWeight: "bold", fontSize: "18px" }}>
+                {/* 使用動態顯示名稱 */}
+                {getRoomDisplayName(activeRoom)}
+              </span>
+              <button onClick={inviteMember} style={{ padding: "8px 15px", borderRadius: "5px", border: "1px solid #0084ff", color: "#0084ff", background: "#fff", cursor: "pointer" }}>
+                邀請成員
+              </button>
             </header>
             
-            <main style={{ flex: 1, overflowY: "auto", padding: "20px" }}>
+            <main style={{ flex: 1, overflowY: "auto", padding: "20px", background: "#fff" }}>
               {messages.map(msg => (
-                <div key={msg.id} style={{ textAlign: msg.uid === user.uid ? "right" : "left", margin: "10px 0" }}>
-                  <div style={{ fontSize: "10px", color: "#888" }}>{msg.displayName}</div>
-                  <div style={{ display: "inline-block", padding: "10px", borderRadius: "10px", background: msg.uid === user.uid ? "#0084ff" : "#e4e6eb", color: msg.uid === user.uid ? "#fff" : "#000" }}>
+                <div key={msg.id} style={{ textAlign: msg.uid === user.uid ? "right" : "left", margin: "15px 0" }}>
+                  <div style={{ fontSize: "11px", color: "#888", marginBottom: "4px" }}>{msg.displayName}</div>
+                  <div style={{ 
+                    display: "inline-block", 
+                    padding: "10px 15px", 
+                    borderRadius: "18px", 
+                    background: msg.uid === user.uid ? "#0084ff" : "#e4e6eb", 
+                    color: msg.uid === user.uid ? "#fff" : "#000",
+                    maxWidth: "70%",
+                    wordBreak: "break-word"
+                  }}>
                     {msg.text}
                   </div>
                 </div>
@@ -186,13 +240,23 @@ function App() {
               <div ref={scrollRef}></div>
             </main>
 
-            <form onSubmit={sendMessage} style={{ padding: "20px", background: "#fff", display: "flex" }}>
-              <input value={newMessage} onChange={e => setNewMessage(e.target.value)} placeholder="輸入訊息..." style={{ flex: 1, padding: "10px", borderRadius: "20px", border: "1px solid #ddd" }} />
-              <button type="submit" style={{ marginLeft: "10px" }}>傳送</button>
+            <form onSubmit={sendMessage} style={{ padding: "20px", background: "#fff", borderTop: "1px solid #ddd", display: "flex" }}>
+              <input 
+                value={newMessage} 
+                onChange={e => setNewMessage(e.target.value)} 
+                placeholder="輸入訊息..." 
+                style={{ flex: 1, padding: "12px 20px", borderRadius: "25px", border: "1px solid #ddd", outline: "none" }} 
+              />
+              <button type="submit" style={{ marginLeft: "10px", padding: "10px 25px", background: "#0084ff", color: "#fff", border: "none", borderRadius: "25px", cursor: "pointer", fontWeight: "bold" }}>
+                傳送
+              </button>
             </form>
           </>
         ) : (
-          <div style={{ margin: "auto", color: "#888" }}>請選擇一個房間開始聊天</div>
+          <div style={{ margin: "auto", color: "#999", textAlign: "center" }}>
+            <h3>歡迎來到 NTHU 聊天室</h3>
+            <p>從左側選擇一個好友或點擊 ➕ 開始新對話</p>
+          </div>
         )}
       </div>
     </div>
