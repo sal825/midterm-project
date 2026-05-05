@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef } from "react";
 import { auth, db } from "./firebase";
 import { 
   onAuthStateChanged, signOut, createUserWithEmailAndPassword, 
-  signInWithEmailAndPassword, updateProfile, updateEmail
+  signInWithEmailAndPassword, updateProfile, updateEmail,
+  GoogleAuthProvider, signInWithPopup // 引入 Google 登入所需組件[cite: 1]
 } from "firebase/auth";
 import { 
   collection, addDoc, query, orderBy, onSnapshot, serverTimestamp, 
@@ -13,7 +14,7 @@ import {
 const style = document.createElement('style');
 style.textContent = `
   @keyframes messageSlideIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-  .message-bubble { animation: messageSlideIn 0.3s ease-out forwards; }
+  .message-bubble { animation: messageSlideIn 0.3s ease-out forwards; position: relative; }
   .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); display: flex; justify-content: center; align-items: center; z-index: 1000; }
   .modal-content { background: white; padding: 30px; border-radius: 15px; width: 450px; max-height: 80vh; overflow-y: auto; box-shadow: 0 5px 15px rgba(0,0,0,0.3); }
   .profile-input { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 5px; box-sizing: border-box; }
@@ -21,6 +22,17 @@ style.textContent = `
   .user-select-item:hover { background: #f0f7ff; }
   .sidebar-avatar { width: 40px; height: 40px; border-radius: 50%; object-fit: cover; background: #eee; flex-shrink: 0; }
   button:disabled { background: #ccc !important; cursor: not-allowed; }
+  
+  .msg-action-bar { display: flex; gap: 8px; font-size: 12px; margin-top: 4px; opacity: 0; transition: 0.2s; }
+  .message-container:hover .msg-action-bar { opacity: 1; }
+  .action-btn { cursor: pointer; color: #666; background: none; border: none; padding: 0; text-decoration: underline; }
+  .action-btn:hover { color: #0084ff; }
+  .search-bar { padding: 8px 15px; border-radius: 20px; border: 1px solid #ddd; width: 200px; outline: none; font-size: 14px; }
+  .image-preview { max-width: 250px; border-radius: 10px; cursor: pointer; margin-top: 5px; }
+
+  /* Google 登入按鈕樣式[cite: 1] */
+  .google-btn { display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%; padding: 10px; margin-top: 10px; background: white; border: 1px solid #ddd; border-radius: 5px; cursor: pointer; font-weight: bold; }
+  .google-btn:hover { background: #f9f9f9; }
 `;
 document.head.appendChild(style);
 
@@ -32,6 +44,10 @@ function App() {
   const [newMessage, setNewMessage] = useState("");
   const [allUsers, setAllUsers] = useState([]); 
   
+  const [searchTerm, setSearchTerm] = useState(""); 
+  const [editingId, setEditingId] = useState(null); 
+  const [editText, setEditText] = useState("");     
+
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [isInviteOpen, setIsInviteOpen] = useState(false);
   const [addingIds, setAddingIds] = useState([]); 
@@ -43,29 +59,31 @@ function App() {
   const [isRegistering, setIsRegistering] = useState(false);
   
   const scrollRef = useRef();
-  const activeRoomRef = useRef(null); // 用於在非同步中獲取最新的 activeRoom
+  const activeRoomRef = useRef(null);
+  const fileInputRef = useRef(); 
 
   const MY_DEFAULT_AVATAR = "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQX5yy5UXGD6VOurditkh6kO3et1ydkRMnzAw&s";
   const GROUP_DEFAULT_AVATAR = "https://cdn-icons-png.flaticon.com/512/615/615075.png";
 
-  // 更新 Ref 以便通知判斷
   useEffect(() => { activeRoomRef.current = activeRoom; }, [activeRoom]);
 
-  // 1. 登入監聽
+  // --- XSS 防禦函式 (2%)[cite: 1] ---
+  const sanitize = (str) => {
+    if (!str) return "";
+    return str.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  };
+
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       if (currentUser) {
         const userRef = doc(db, "users", currentUser.uid);
         const userSnap = await getDoc(userRef);
         const dbData = userSnap.exists() ? userSnap.data() : {};
-        
-        if (!currentUser.photoURL) {
-          await updateProfile(currentUser, { photoURL: MY_DEFAULT_AVATAR });
-        }
+        if (!currentUser.photoURL) await updateProfile(currentUser, { photoURL: MY_DEFAULT_AVATAR });
 
         const initialData = {
           uid: currentUser.uid,
-          displayName: dbData.displayName || currentUser.displayName || username || currentUser.email, 
+          displayName: sanitize(dbData.displayName || currentUser.displayName || username || currentUser.email), 
           photoURL: dbData.photoURL || currentUser.photoURL || MY_DEFAULT_AVATAR,
           email: currentUser.email || "",
           phone: dbData.phone || "",
@@ -74,17 +92,12 @@ function App() {
         setProfileData(initialData);
         setUser({ ...currentUser, displayName: initialData.displayName, photoURL: initialData.photoURL });
         await setDoc(userRef, initialData, { merge: true });
-
-        // 請求通知權限
-        if (Notification.permission === "default") {
-          Notification.requestPermission();
-        }
+        if (Notification.permission === "default") Notification.requestPermission();
       } else { setUser(null); }
     });
     return () => unsubscribe();
   }, [username]);
 
-  // 2. 獲取房間與使用者同步
   useEffect(() => {
     if (!user) return;
     const q = query(collection(db, "rooms"), where("members", "array-contains", user.uid));
@@ -92,40 +105,23 @@ function App() {
       const roomList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setRooms(roomList);
     });
-
     const unsubscribeUsers = onSnapshot(collection(db, "users"), (snapshot) => {
       setAllUsers(snapshot.docs.map(doc => doc.data()));
     });
     return () => { unsubscribeRooms(); unsubscribeUsers(); };
   }, [user]);
 
-  // 3. 訊息通知系統 (核心修改)
   useEffect(() => {
     if (!user || rooms.length === 0) return;
-
     const listeners = rooms.map(room => {
-      const q = query(
-        collection(db, "rooms", room.id, "messages"),
-        orderBy("createdAt", "desc"),
-        limit(1)
-      );
-
-      let isFirstLoad = true; // 避免一開始就把舊訊息當成新訊息跳通知
-
+      const q = query(collection(db, "rooms", room.id, "messages"), orderBy("createdAt", "desc"), limit(1));
+      let isFirstLoad = true;
       return onSnapshot(q, (snapshot) => {
-        if (isFirstLoad) {
-          isFirstLoad = false;
-          return;
-        }
-
+        if (isFirstLoad) { isFirstLoad = false; return; }
         snapshot.docChanges().forEach((change) => {
           if (change.type === "added") {
             const msgData = change.doc.data();
-            
-            // 判斷是否需要發送通知：
-            // 1. 不是自己傳的
-            // 2. 當前不是在看這個聊天室
-            // 3. 訊息不是空的
+            // 未讀通知邏輯優化 (5%): 判斷發送者及目前視窗[cite: 1]
             if (msgData.uid !== user.uid && activeRoomRef.current?.id !== room.id) {
               sendBrowserNotification(room, msgData);
             }
@@ -133,11 +129,9 @@ function App() {
         });
       });
     });
-
     return () => listeners.forEach(unsub => unsub());
   }, [rooms, user]);
 
-  // 4. 當前選中房間的訊息顯示
   useEffect(() => {
     if (!activeRoom || !user) return;
     const q = query(collection(db, "rooms", activeRoom.id, "messages"), orderBy("createdAt", "asc"));
@@ -148,20 +142,49 @@ function App() {
     return () => unsubscribe();
   }, [activeRoom, user]);
 
-  // --- 輔助函式 ---
+  
+  const handleUnsend = async (msgId) => {
+    if (window.confirm("確定要回收此訊息嗎？")) {
+      await deleteDoc(doc(db, "rooms", activeRoom.id, "messages", msgId));
+    }
+  };
+
+  // 編輯訊息 - 套用 XSS 防禦 (2%)[cite: 1]
+  const handleEdit = async (msgId) => {
+    if (!editText.trim()) return;
+    await updateDoc(doc(db, "rooms", activeRoom.id, "messages", msgId), {
+      text: sanitize(editText), 
+      isEdited: true
+    });
+    setEditingId(null);
+  };
+
+  const handleImageUpload = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      await addDoc(collection(db, "rooms", activeRoom.id, "messages"), {
+        imageUrl: event.target.result,
+        createdAt: serverTimestamp(),
+        uid: user.uid,
+        displayName: user.displayName,
+      });
+    };
+    reader.readAsDataURL(file);
+  };
+
+  // 未讀通知標題優化[cite: 1]
   const sendBrowserNotification = (room, msg) => {
     if (Notification.permission === "granted") {
-      const title = room.isGroup ? `[群組] ${room.name}` : `來自 ${msg.displayName} 的訊息`;
+      const title = `[未讀訊息] ${room.isGroup ? room.name : msg.displayName}`; 
       const options = {
-        body: msg.text,
+        body: msg.imageUrl ? "傳送了一張圖片" : msg.text,
         icon: room.isGroup ? GROUP_DEFAULT_AVATAR : (allUsers.find(u => u.uid === msg.uid)?.photoURL || MY_DEFAULT_AVATAR),
         silent: false
       };
       const n = new Notification(title, options);
-      n.onclick = () => {
-        window.focus();
-        setActiveRoom(room);
-      };
+      n.onclick = () => { window.focus(); setActiveRoom(room); };
     }
   };
 
@@ -179,7 +202,6 @@ function App() {
     return otherUser ? otherUser.photoURL : MY_DEFAULT_AVATAR;
   };
 
-  // ... (其餘邏輯 handleCreateGroup, createFriendship, sendMessage 等保持不變)
   const getFriends = () => {
     const friendUids = rooms
       .filter(r => !r.isGroup && r.members.length === 2)
@@ -198,7 +220,7 @@ function App() {
   const handleCreateGroup = async () => {
     const name = prompt("請輸入群組名稱:");
     if (!name) return;
-    const newGroup = { name, members: [user.uid], isGroup: true, creator: user.uid, createdAt: serverTimestamp() };
+    const newGroup = { name: sanitize(name), members: [user.uid], isGroup: true, creator: user.uid, createdAt: serverTimestamp() };
     const docRef = await addDoc(collection(db, "rooms"), newGroup);
     setActiveRoom({ id: docRef.id, ...newGroup });
   };
@@ -221,11 +243,15 @@ function App() {
     }
   };
 
+  // 發送訊息 - 套用 XSS 防禦 (2%)[cite: 1]
   const sendMessage = async (e) => {
     e.preventDefault();
     if (newMessage.trim() === "" || !activeRoom) return;
     await addDoc(collection(db, "rooms", activeRoom.id, "messages"), {
-      text: newMessage.replace(/</g, "&lt;"), createdAt: serverTimestamp(), uid: user.uid, displayName: user.displayName,
+      text: sanitize(newMessage), 
+      createdAt: serverTimestamp(), 
+      uid: user.uid, 
+      displayName: user.displayName,
     });
     setNewMessage("");
   };
@@ -233,25 +259,42 @@ function App() {
   const handleSaveProfile = async () => {
     try {
       if (profileData.email !== user.email) await updateEmail(auth.currentUser, profileData.email);
-      await updateProfile(auth.currentUser, { displayName: profileData.displayName, photoURL: profileData.photoURL });
+      await updateProfile(auth.currentUser, { displayName: sanitize(profileData.displayName), photoURL: profileData.photoURL });
       await updateDoc(doc(db, "users", user.uid), {
-        displayName: profileData.displayName, photoURL: profileData.photoURL, email: profileData.email, phone: profileData.phone, address: profileData.address
+        displayName: sanitize(profileData.displayName), photoURL: profileData.photoURL, email: profileData.email, phone: profileData.phone, address: profileData.address
       });
       alert("更新成功！");
       setIsProfileOpen(false);
     } catch (e) { alert("儲存失敗: " + e.message); }
   };
 
+  // 註冊/登入 - 套用 XSS 防禦 (2%)[cite: 1]
   const handleEmailAuth = async (e) => {
     e.preventDefault();
     try {
       if (isRegistering) {
         const res = await createUserWithEmailAndPassword(auth, email, password);
-        await updateProfile(res.user, { displayName: username, photoURL: MY_DEFAULT_AVATAR });
-        await setDoc(doc(db, "users", res.user.uid), { uid: res.user.uid, displayName: username, email: email, photoURL: MY_DEFAULT_AVATAR, phone: "", address: "" });
+        const cleanName = sanitize(username);
+        await updateProfile(res.user, { displayName: cleanName, photoURL: MY_DEFAULT_AVATAR });
+        await setDoc(doc(db, "users", res.user.uid), { uid: res.user.uid, displayName: cleanName, email: email, photoURL: MY_DEFAULT_AVATAR, phone: "", address: "" });
       } else { await signInWithEmailAndPassword(auth, email, password); }
     } catch (error) { alert(error.message); }
   };
+
+  // Google 登入實作 (1%)[cite: 1]
+  const handleGoogleLogin = async () => {
+    const provider = new GoogleAuthProvider();
+    try {
+      await signInWithPopup(auth, provider);
+    } catch (error) {
+      alert("Google 登入失敗: " + error.message);
+    }
+  };
+
+  const filteredMessages = messages.filter(msg => 
+    msg.text?.toLowerCase().includes(searchTerm.toLowerCase()) || 
+    !msg.text 
+  );
 
   if (!user) {
     return (
@@ -263,6 +306,11 @@ function App() {
           <input type="password" placeholder="密碼" onChange={e => setPassword(e.target.value)} required style={{ padding: "10px" }} />
           <button type="submit" style={{ padding: "10px", background: "#4caf50", color: "#fff", border: "none", borderRadius: "5px", cursor: "pointer" }}>確認</button>
         </form>
+        {/* Google 登入按鈕[cite: 1] */}
+        <button onClick={handleGoogleLogin} className="google-btn">
+          <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/04-gplus-logo.png" width="18" alt="G" />
+          使用 Google 帳號登入
+        </button>
         <button onClick={() => setIsRegistering(!isRegistering)} style={{ marginTop: "15px", background: "none", border: "none", color: "blue", cursor: "pointer" }}>
           {isRegistering ? "已有帳號？登入" : "還沒帳號？註冊"}
         </button>
@@ -337,15 +385,11 @@ function App() {
           {rooms.map(room => (
             <div 
               key={room.id} 
-              onClick={() => setActiveRoom(room)} 
+              onClick={() => { setActiveRoom(room); setSearchTerm(""); }} 
               style={{ 
-                padding: "12px 20px", 
-                cursor: "pointer", 
+                padding: "12px 20px", cursor: "pointer", 
                 background: activeRoom?.id === room.id ? "#e6f2ff" : "none", 
-                borderBottom: "1px solid #eee",
-                display: "flex",
-                alignItems: "center",
-                gap: "12px"
+                borderBottom: "1px solid #eee", display: "flex", alignItems: "center", gap: "12px"
               }}
             >
               <img src={getRoomDisplayAvatar(room)} className="sidebar-avatar" />
@@ -377,7 +421,16 @@ function App() {
                 <img src={getRoomDisplayAvatar(activeRoom)} className="sidebar-avatar" style={{ width: "35px", height: "35px" }} />
                 <span style={{ fontWeight: "bold", fontSize: "18px" }}>{getRoomDisplayName(activeRoom)}</span>
               </div>
-              <div style={{ display: "flex", gap: "10px" }}>
+              
+              <div style={{ display: "flex", alignItems: "center", gap: "15px" }}>
+                <input 
+                  type="text" 
+                  className="search-bar" 
+                  placeholder="🔍 搜尋訊息..." 
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                />
+                
                 {activeRoom.isGroup && (
                   <>
                     <button onClick={() => setIsInviteOpen(true)} style={{ padding: "8px 15px", borderRadius: "5px", border: "1px solid #0084ff", color: "#0084ff", background: "#fff", cursor: "pointer" }}>邀請好友</button>
@@ -386,16 +439,69 @@ function App() {
                 )}
               </div>
             </header>
+
             <main style={{ flex: 1, overflowY: "auto", padding: "20px", background: "#fff" }}>
-              {messages.map(msg => (
-                <div key={msg.id} style={{ textAlign: msg.uid === user.uid ? "right" : "left", margin: "15px 0" }}>
-                  <div style={{ fontSize: "11px", color: "#888", marginBottom: "4px" }}>{msg.displayName}</div>
-                  <div className="message-bubble" style={{ display: "inline-block", padding: "10px 15px", borderRadius: "18px", background: msg.uid === user.uid ? "#0084ff" : "#e4e6eb", color: msg.uid === user.uid ? "#fff" : "#000", maxWidth: "250px", wordBreak: "break-word", textAlign: "left" }}>{msg.text}</div>
+              {filteredMessages.map(msg => (
+                <div key={msg.id} className="message-container" style={{ textAlign: msg.uid === user.uid ? "right" : "left", margin: "15px 0" }}>
+                  <div style={{ fontSize: "11px", color: "#888", marginBottom: "4px" }}>
+                    {msg.displayName} {msg.isEdited && "(已編輯)"}
+                  </div>
+                  
+                  {msg.imageUrl ? (
+                    <div style={{ display: "inline-block" }}>
+                      <img src={msg.imageUrl} className="image-preview" alt="sent" />
+                      {msg.uid === user.uid && (
+                        <div className="msg-action-bar" style={{ justifyContent: "flex-end" }}>
+                          <button className="action-btn" onClick={() => handleUnsend(msg.id)}>回收圖片</button>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div style={{ display: "inline-block" }}>
+                      {editingId === msg.id ? (
+                        <div style={{ display: "flex", gap: "5px" }}>
+                          <input 
+                            value={editText} 
+                            onChange={(e) => setEditText(e.target.value)}
+                            style={{ padding: "5px", borderRadius: "5px", border: "1px solid #ccc" }}
+                          />
+                          <button onClick={() => handleEdit(msg.id)}>儲存</button>
+                          <button onClick={() => setEditingId(null)}>取消</button>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="message-bubble" style={{ 
+                            display: "inline-block", padding: "10px 15px", borderRadius: "18px", 
+                            background: msg.uid === user.uid ? "#0084ff" : "#e4e6eb", 
+                            color: msg.uid === user.uid ? "#fff" : "#000", maxWidth: "250px", wordBreak: "break-word", textAlign: "left" 
+                          }}>
+                            {msg.text}
+                          </div>
+                          {msg.uid === user.uid && (
+                            <div className="msg-action-bar" style={{ justifyContent: msg.uid === user.uid ? "flex-end" : "flex-start" }}>
+                              <button className="action-btn" onClick={() => { setEditingId(msg.id); setEditText(msg.text); }}>編輯</button>
+                              <button className="action-btn" onClick={() => handleUnsend(msg.id)}>回收</button>
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
                 </div>
               ))}
               <div ref={scrollRef}></div>
             </main>
-            <form onSubmit={sendMessage} style={{ padding: "20px", background: "#fff", borderTop: "1px solid #ddd", display: "flex" }}>
+
+            <form onSubmit={sendMessage} style={{ padding: "20px", background: "#fff", borderTop: "1px solid #ddd", display: "flex", alignItems: "center" }}>
+              <button 
+                type="button" 
+                onClick={() => fileInputRef.current.click()}
+                style={{ border: "none", background: "none", fontSize: "24px", cursor: "pointer", marginRight: "10px" }}
+              >
+                🖼️
+              </button>
+              <input type="file" ref={fileInputRef} hidden accept="image/*" onChange={handleImageUpload} />
+              
               <input value={newMessage} onChange={e => setNewMessage(e.target.value)} placeholder="輸入訊息..." style={{ flex: 1, padding: "12px 20px", borderRadius: "25px", border: "1px solid #ddd", outline: "none" }} />
               <button type="submit" style={{ marginLeft: "10px", padding: "10px 25px", background: "#0084ff", color: "#fff", border: "none", borderRadius: "25px", cursor: "pointer", fontWeight: "bold" }}>傳送</button>
             </form>
