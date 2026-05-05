@@ -300,11 +300,30 @@ function App() {
   };
 
   const addFriendToGroup = async (friendUid) => {
+    // 1. 防止重複點擊
     if (addingIds.includes(friendUid)) return;
     setAddingIds(prev => [...prev, friendUid]);
+
     try {
-      await updateDoc(doc(db, "rooms", activeRoom.id), { members: arrayUnion(friendUid) });
+      // 2. 更新 Firebase Firestore 資料庫
+      const roomRef = doc(db, "rooms", activeRoom.id);
+      await updateDoc(roomRef, { 
+        members: arrayUnion(friendUid) 
+      });
+
+      // 3. 關鍵修正：手動更新本地 activeRoom 狀態
+      // 這會觸發 UI 重新渲染，使 Modal 中的 isAlreadyIn 判斷立刻生效
+      setActiveRoom(prev => ({
+        ...prev,
+        members: [...prev.members, friendUid]
+      }));
+
+      // 4. 清除「正在加入」的 loading 狀態
+      setAddingIds(prev => prev.filter(id => id !== friendUid));
+      
     } catch (e) {
+      // 錯誤處理
+      console.error("邀請失敗:", e);
       alert("邀請失敗");
       setAddingIds(prev => prev.filter(id => id !== friendUid));
     }
