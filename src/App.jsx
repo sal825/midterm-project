@@ -142,7 +142,12 @@ function App() {
     return () => unsubscribe();
   }, [activeRoom, user]);
 
-  
+  useEffect(() => {
+    if (activeRoom) {
+      const updatedRoom = rooms.find(r => r.id === activeRoom.id);
+      if (updatedRoom) setActiveRoom(updatedRoom);
+    }
+  }, [rooms]);
   const handleUnsend = async (msgId) => {
     if (window.confirm("確定要回收此訊息嗎？")) {
       await deleteDoc(doc(db, "rooms", activeRoom.id, "messages", msgId));
