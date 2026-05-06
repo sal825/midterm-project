@@ -73,6 +73,7 @@ function App() {
   const [isInviteOpen, setIsInviteOpen] = useState(false);
   const [addingIds, setAddingIds] = useState([]); 
   const [profileData, setProfileData] = useState({ displayName: "", photoURL: "", email: "", phone: "", address: "", blockedUsers: [] });
+  const [tempProfileData, setTempProfileData] = useState(null);
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -87,6 +88,7 @@ function App() {
   const scrollRef = useRef();
   const activeRoomRef = useRef(null);
   const fileInputRef = useRef(); 
+  const profilePhotoInputRef = useRef();
   const messageRefs = useRef({}); // 用於跳轉回覆訊息
 
   const MY_DEFAULT_AVATAR = "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQX5yy5UXGD6VOurditkh6kO3et1ydkRMnzAw&s";
@@ -139,15 +141,62 @@ function App() {
     return () => { unsubscribeRooms(); unsubscribeUsers(); };
   }, [user]);
 
+  // --- 監聽器一：負責顯示主視窗訊息 ---
   useEffect(() => {
-    if (!activeRoom || !user) return;
-    const q = query(collection(db, "rooms", activeRoom.id, "messages"), orderBy("createdAt", "asc"));
+    if (!activeRoom || !user) {
+      setMessages([]); // 切換房間時先清空，避免看到上一位的訊息
+      return;
+    }
+
+    const q = query(
+      collection(db, "rooms", activeRoom.id, "messages"), 
+      orderBy("createdAt", "asc")
+    );
+
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      setMessages(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+      const newMsgs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setMessages(newMsgs); // 只有這裡會更新對話框內容
       setTimeout(() => scrollRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
     });
+
     return () => unsubscribe();
-  }, [activeRoom, user]);
+  }, [activeRoom?.id, user]);
+
+
+  // --- 監聽器二：負責背景通知 (不影響 UI) ---
+  useEffect(() => {
+    if (!user || rooms.length === 0) return;
+
+    const unsubscribes = rooms.map((room) => {
+      const q = query(
+        collection(db, "rooms", room.id, "messages"),
+        orderBy("createdAt", "desc"),
+        limit(1)
+      );
+
+      return onSnapshot(q, (snapshot) => {
+        if (snapshot.empty) return;
+        const lastMsg = { id: snapshot.docs[0].id, ...snapshot.docs[0].data() };
+
+        // 檢查是否為新訊息且非自己發送
+        const isNew = lastMsg.createdAt?.toMillis() > Date.now() - 5000;
+        const isNotMe = lastMsg.uid !== user.uid;
+        const isNotActive = room.id !== activeRoomRef.current?.id || document.hidden;
+
+        if (isNew && isNotMe && isNotActive) {
+          if (Notification.permission === "granted") {
+            new Notification(`來自 ${lastMsg.displayName} 的訊息`, {
+              body: lastMsg.text || "[圖片]",
+              icon: room.isGroup ? GROUP_DEFAULT_AVATAR : (allUsers.find(u => u.uid === lastMsg.uid)?.photoURL || MY_DEFAULT_AVATAR)
+            });
+          }
+        }
+        // 注意：這裡千萬不要寫 setMessages(...)！
+      });
+    });
+
+    return () => unsubscribes.forEach(unsub => unsub());
+  }, [rooms.length, user]); // 注意依賴項，rooms 長度變了才重新註冊
 
   // --- 封鎖邏輯 ---
   const handleBlockUser = async (targetUid) => {
@@ -331,14 +380,29 @@ function App() {
 
   const handleSaveProfile = async () => {
     try {
-      if (profileData.email !== user.email) await updateEmail(auth.currentUser, profileData.email);
-      await updateProfile(auth.currentUser, { displayName: sanitize(profileData.displayName), photoURL: profileData.photoURL });
-      await updateDoc(doc(db, "users", user.uid), {
-        displayName: sanitize(profileData.displayName), photoURL: profileData.photoURL, email: profileData.email, phone: profileData.phone, address: profileData.address
+      // 1. 更新 Firebase Auth 的顯示名稱 (不更新 Email 與 PhotoURL 以免報錯)
+      await updateProfile(auth.currentUser, { 
+        displayName: sanitize(tempProfileData.displayName) 
       });
-      alert("更新成功！");
+      
+      // 2. 更新 Firestore 中的使用者資料 (包含電話、地址與顯示用的 Email)
+      const userRef = doc(db, "users", user.uid);
+      await updateDoc(userRef, {
+        displayName: sanitize(tempProfileData.displayName), 
+        photoURL: tempProfileData.photoURL, 
+        email: tempProfileData.email, // 這裡僅更新資料庫內容，不影響登入
+        phone: tempProfileData.phone || "", 
+        address: tempProfileData.address || ""
+      });
+
+      // 3. 更新本地狀態並關閉 Modal
+      setProfileData(tempProfileData); 
+      alert("個人資料更新成功！");
       setIsProfileOpen(false);
-    } catch (e) { alert("儲存失敗: " + e.message); }
+    } catch (e) { 
+      console.error(e);
+      alert("儲存失敗: " + e.message); 
+    }
   };
 
   const handleEmailAuth = async (e) => {
@@ -357,6 +421,25 @@ function App() {
     const provider = new GoogleAuthProvider();
     try { await signInWithPopup(auth, provider); } catch (error) { alert("Google 登入失敗: " + error.message); }
   };
+  // --- 處理個人頭像上傳 ---
+  // 處理頭像圖片選取 (改為操作 tempProfileData)
+  const handleProfilePhotoUpload = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    // 1MB = 1048576 bytes
+    if (file.size > 1000000) { 
+      alert("圖片太大了！請選取小於 1MB 的檔案。");
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      setTempProfileData(prev => ({ ...prev, photoURL: event.target.result }));
+    };
+    reader.readAsDataURL(file);
+  };
+
 
   // 過濾訊息邏輯 (搜尋 + 隱藏互相封鎖者的訊息)
   const filteredMessages = messages.filter(msg => {
@@ -427,22 +510,69 @@ function App() {
       )}
 
       {/* Profile Modal */}
-      {isProfileOpen && (
+      {isProfileOpen && tempProfileData && (
         <div className="modal-overlay">
           <div className="modal-content">
             <h3>個人資料</h3>
-            <label>頭像網址:</label> <input className="profile-input" value={profileData.photoURL} onChange={e => setProfileData({...profileData, photoURL: e.target.value})} />
-            <label>暱稱:</label> <input className="profile-input" value={profileData.displayName} onChange={e => setProfileData({...profileData, displayName: e.target.value})} />
-            <label>Email:</label> <input className="profile-input" value={profileData.email} onChange={e => setProfileData({...profileData, email: e.target.value})} />
-            <div style={{ display: "flex", gap: "10px" }}><button onClick={handleSaveProfile} style={{ flex: 1, padding: "10px", background: "#0084ff", color: "white", border: "none", borderRadius: "5px", cursor: "pointer" }}>儲存</button><button onClick={() => setIsProfileOpen(false)} style={{ flex: 1, padding: "10px", background: "#eee", border: "none", borderRadius: "5px", cursor: "pointer" }}>取消</button></div>
             
-            <h4 style={{ marginTop: "20px" }}>已封鎖清單</h4>
+            {/* 頭像預覽與上傳區 */}
+            <div style={{ textAlign: "center", marginBottom: "20px" }}>
+              <img 
+                src={tempProfileData.photoURL || MY_DEFAULT_AVATAR} 
+                style={{ width: "90px", height: "90px", borderRadius: "50%", objectFit: "cover", border: "2px solid #0084ff" }} 
+                alt="Avatar Preview"
+              />
+            </div>
+
+            <label>頭像設定:</label>
+            <div style={{ display: "flex", gap: "10px", marginTop: "5px", marginBottom: "15px" }}>
+              <input 
+                className="profile-input" 
+                placeholder="貼上圖片網址..." 
+                style={{ flex: 1, margin: 0 }}
+                value={tempProfileData.photoURL.startsWith('data:image') ? "已選取圖片檔案" : tempProfileData.photoURL} 
+                onChange={e => setTempProfileData({...tempProfileData, photoURL: e.target.value})} 
+              />
+              <button 
+                onClick={() => profilePhotoInputRef.current.click()}
+                style={{ padding: "0 10px", background: "#f0f2f5", border: "1px solid #ddd", borderRadius: "5px", cursor: "pointer", fontSize: "13px" }}
+              >
+                📷 上傳圖片
+              </button>
+            </div>
+            <input type="file" ref={profilePhotoInputRef} hidden accept="image/*" onChange={handleProfilePhotoUpload} />
+
+            <label>暱稱:</label>
+            <input className="profile-input" value={tempProfileData.displayName} onChange={e => setTempProfileData({...tempProfileData, displayName: e.target.value})} />
+            
+            <label>顯示用 Email (不影響登入):</label>
+            <input className="profile-input" value={tempProfileData.email} onChange={e => setTempProfileData({...tempProfileData, email: e.target.value})} />
+            
+            {/* 補回電話與地址欄位 */}
+            <label>電話:</label>
+            <input className="profile-input" placeholder="請輸入電話" value={tempProfileData.phone || ""} onChange={e => setTempProfileData({...tempProfileData, phone: e.target.value})} />
+            
+            <label>地址:</label>
+            <input className="profile-input" placeholder="請輸入地址" value={tempProfileData.address || ""} onChange={e => setTempProfileData({...tempProfileData, address: e.target.value})} />
+            
+            <div style={{ display: "flex", gap: "10px", marginTop: "20px" }}>
+              <button onClick={handleSaveProfile} style={{ flex: 1, padding: "10px", background: "#0084ff", color: "white", border: "none", borderRadius: "5px", cursor: "pointer", fontWeight: "bold" }}>儲存變更</button>
+              <button 
+                onClick={() => { setIsProfileOpen(false); setTempProfileData(null); }} 
+                style={{ flex: 1, padding: "10px", background: "#eee", border: "none", borderRadius: "5px", cursor: "pointer" }}
+              >
+                取消
+              </button>
+            </div>
+            
+            <hr style={{ margin: "25px 0", border: "0", borderTop: "1px solid #eee" }} />
+            <h4 style={{ color: "#666" }}>已封鎖清單</h4>
             {profileData.blockedUsers?.map(uid => {
               const u = allUsers.find(user => user.uid === uid);
               return (
-                <div key={uid} style={{ display: "flex", justifyContent: "space-between", padding: "5px 0" }}>
-                  <span>{u?.displayName || uid}</span>
-                  <button onClick={() => handleUnblockUser(uid)} style={{ color: "red", background: "none", border: "none", cursor: "pointer" }}>解除</button>
+                <div key={uid} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid #fafafa" }}>
+                  <span style={{ fontSize: "14px" }}>{u?.displayName || uid}</span>
+                  <button onClick={() => handleUnblockUser(uid)} style={{ color: "#ff4d4f", background: "none", border: "none", cursor: "pointer", fontSize: "13px" }}>解除封鎖</button>
                 </div>
               );
             })}
@@ -453,7 +583,7 @@ function App() {
       {/* 側邊欄 */}
       <div style={{ width: "320px", background: "#fff", borderRight: "1px solid #ddd", display: "flex", flexDirection: "column" }}>
         <div style={{ padding: "20px", borderBottom: "1px solid #ddd", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <div onClick={() => setIsProfileOpen(true)} style={{ cursor: "pointer", display: "flex", alignItems: "center", gap: "10px" }}>
+          <div onClick={() =>{setTempProfileData({ ...profileData });setIsProfileOpen(true);}} style={{ cursor: "pointer", display: "flex", alignItems: "center", gap: "10px" }}>
             <img src={profileData.photoURL} className="sidebar-avatar" style={{ width: "35px", height: "35px" }} />
             <strong style={{ maxWidth: "120px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{profileData.displayName}</strong>
           </div>
