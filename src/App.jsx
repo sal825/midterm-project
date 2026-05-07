@@ -54,10 +54,90 @@ style.textContent = `
   /* 新增：回覆訊息樣式 */
   .reply-preview { background: #f8f9fa; border-left: 4px solid #0084ff; padding: 8px; margin-bottom: 5px; border-radius: 4px; display: flex; justify-content: space-between; font-size: 13px; }
   .reply-quote { background: rgba(0,0,0,0.05); border-radius: 8px; padding: 5px 10px; font-size: 12px; margin-bottom: 4px; cursor: pointer; border-left: 3px solid #ccc; text-align: left; }
+  /* 新增 RWD 樣式 */
+
+  * { box-sizing: border-box; }
+.sidebar {
+  width: 320px;
+  background: #fff;
+  border-right: 1px solid #ddd;
+  display: flex;
+  flex-direction: column;
+  transition: width 0.3s ease;
+  flex-shrink: 0;
+  overflow: hidden; 
+  /* 增加白色邊界的視覺連續性 */
+  white-space: nowrap;
+}
+.sidebar.collapsed {
+  width: 0;
+  border-right: none;
+}
+.sidebar-toggle-btn {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 22px;
+  height: 44px;
+  border-radius: 0 6px 6px 0;
+  border: 1px solid #ddd;
+  border-left: none;
+  background: white;
+  cursor: pointer;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 101;
+  box-shadow: 2px 0 4px rgba(0,0,0,0.1);
+}
+.sidebar-wrapper {
+  display: flex;
+  position: relative;
+  flex-shrink: 0;
+}
+.mobile-menu-btn {
+  display: none;
+  background: none;
+  border: none;
+  font-size: 22px;
+  cursor: pointer;
+  padding: 0 5px;
+}
+.sidebar-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.3);
+  z-index: 99;
+}
+@media (max-width: 768px) {
+  .sidebar {
+    position: fixed !important;
+    top: 0; left: 0;
+    height: 100%;
+    width: 280px !important;
+    transform: translateX(-100%);
+    z-index: 200;
+  }
+  .sidebar.mobile-open {
+    transform: translateX(0) !important;
+  }
+  .sidebar.collapsed {
+    width: 280px !important;
+    transform: translateX(-100%);
+  }
+  .sidebar-toggle-btn { display: none !important; }
+  .mobile-menu-btn { display: block !important; }
+  .sidebar-overlay { display: block; }
+  .sidebar-overlay.active { display: block; }
+}
 `;
 document.head.appendChild(style);
 
 function App() {
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [user, setUser] = useState(null);
   const [rooms, setRooms] = useState([]); 
   const [activeRoom, setActiveRoom] = useState(null); 
@@ -94,6 +174,17 @@ function App() {
   const MY_DEFAULT_AVATAR = "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQX5yy5UXGD6VOurditkh6kO3et1ydkRMnzAw&s";
   const GROUP_DEFAULT_AVATAR = "https://cdn-icons-png.flaticon.com/512/615/615075.png";
   const EMOJI_LIST = ["❤️", "😂", "😮", "😢", "😡", "👍"];
+
+  // 視窗縮小時自動收起
+  useEffect(() => {
+    const handleResize = () => {
+      if (window.innerWidth <= 768) {
+        setMobileSidebarOpen(false);
+      }
+    };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
 
   useEffect(() => { activeRoomRef.current = activeRoom; }, [activeRoom]);
 
@@ -580,38 +671,50 @@ function App() {
         </div>
       )}
 
-      {/* 側邊欄 */}
-      <div style={{ width: "320px", background: "#fff", borderRight: "1px solid #ddd", display: "flex", flexDirection: "column" }}>
-        <div style={{ padding: "20px", borderBottom: "1px solid #ddd", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <div onClick={() =>{setTempProfileData({ ...profileData });setIsProfileOpen(true);}} style={{ cursor: "pointer", display: "flex", alignItems: "center", gap: "10px" }}>
-            <img src={profileData.photoURL} className="sidebar-avatar" style={{ width: "35px", height: "35px" }} />
-            <strong style={{ maxWidth: "120px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{profileData.displayName}</strong>
-          </div>
-          <button onClick={() => signOut(auth)} style={{ padding: "5px 10px", fontSize: "12px", cursor: "pointer" }}>登出</button>
-        </div>
-        
-        <div style={{ flex: 1, overflowY: "auto" }}>
-          <div style={{ padding: "10px 20px", background: "#f8f9fa", fontSize: "13px", color: "#666", fontWeight: "bold", display: "flex", justifyContent: "space-between" }}>
-            <span>聊天室</span> <button onClick={handleCreateGroup} style={{ border: "none", background: "none", cursor: "pointer", fontSize: "16px" }}>👥+</button>
-          </div>
-          {rooms.map(room => (
-            <div key={room.id} onClick={() =>{ setActiveRoom(room);setSearchTerm("");setReplyTo(null);setNewMessage("")}} style={{ padding: "12px 20px", cursor: "pointer", background: activeRoom?.id === room.id ? "#e6f2ff" : "none", borderBottom: "1px solid #eee", display: "flex", alignItems: "center", gap: "12px" }}>
-              <img src={getRoomDisplayAvatar(room)} className="sidebar-avatar" />
-              <span style={{ flex: 1 }}>{getRoomDisplayName(room)}</span>
+      {/* 側邊欄 wrapper */}
+      <div className="sidebar-wrapper">
+        <div className={`sidebar ${!sidebarOpen ? 'collapsed' : ''}`}>
+          <div style={{ padding: "20px", borderBottom: "1px solid #ddd", display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}>
+            <div onClick={() =>{setTempProfileData({ ...profileData });setIsProfileOpen(true);}} style={{ cursor: "pointer", display: "flex", alignItems: "center", gap: "10px" }}>
+              <img src={profileData.photoURL} className="sidebar-avatar" style={{ width: "35px", height: "35px" }} />
+              <strong style={{ maxWidth: "120px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{profileData.displayName}</strong>
             </div>
-          ))}
+            <button onClick={() => signOut(auth)} style={{ padding: "5px 10px", fontSize: "12px", cursor: "pointer" }}>登出</button>
+          </div>
           
-          <div style={{ padding: "10px 20px", background: "#f8f9fa", fontSize: "13px", color: "#666", fontWeight: "bold" }}>發現新使用者</div>
-          {allUsers.filter(u => u.uid !== user.uid && !rooms.some(r => !r.isGroup && r.members.includes(u.uid))).map(u => (
-            <div key={u.uid} onClick={() => {createFriendship(u);setReplyTo(null)}} style={{ padding: "12px 20px", cursor: "pointer", borderBottom: "1px solid #eee", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-                <img src={u.photoURL || MY_DEFAULT_AVATAR} className="sidebar-avatar" />
-                <span>{u.displayName}</span>
-              </div>
-              <span style={{ color: "#0084ff" }}>➕</span>
+          <div style={{ flex: 1, overflowY: "auto", width: "100%" }}>
+            <div style={{ padding: "10px 20px", background: "#f8f9fa", fontSize: "13px", color: "#666", fontWeight: "bold", display: "flex", justifyContent: "space-between" }}>
+              <span>聊天室</span> <button onClick={handleCreateGroup} style={{ border: "none", background: "none", cursor: "pointer", fontSize: "16px" }}>👥+</button>
             </div>
-          ))}
+            {rooms.map(room => (
+              <div key={room.id} onClick={() =>{ setActiveRoom(room);setSearchTerm("");setReplyTo(null);setNewMessage("")}} style={{ padding: "12px 20px", cursor: "pointer", background: activeRoom?.id === room.id ? "#e6f2ff" : "none", borderBottom: "1px solid #eee", display: "flex", alignItems: "center", gap: "12px" }}>
+                <img src={getRoomDisplayAvatar(room)} className="sidebar-avatar" />
+                <span style={{ flex: 1 }}>{getRoomDisplayName(room)}</span>
+              </div>
+            ))}
+            
+            <div style={{ padding: "10px 20px", background: "#f8f9fa", fontSize: "13px", color: "#666", fontWeight: "bold" }}>發現新使用者</div>
+            {allUsers.filter(u => u.uid !== user.uid && !rooms.some(r => !r.isGroup && r.members.includes(u.uid))).map(u => (
+              <div key={u.uid} onClick={() => {createFriendship(u);setReplyTo(null)}} style={{ padding: "12px 20px", cursor: "pointer", borderBottom: "1px solid #eee", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                  <img src={u.photoURL || MY_DEFAULT_AVATAR} className="sidebar-avatar" />
+                  <span>{u.displayName}</span>
+                </div>
+                <span style={{ color: "#0084ff" }}>➕</span>
+              </div>
+            ))}
+          </div>
         </div>
+
+        {/* 收合按鈕：在 sidebar 外層，不受 overflow:hidden 影響 */}
+        <button
+          className="sidebar-toggle-btn"
+          style={{ left: sidebarOpen ? "320px" : "0px" }}
+          onClick={() => setSidebarOpen(!sidebarOpen)}
+          title={sidebarOpen ? "收起側邊欄" : "展開側邊欄"}
+        >
+          {sidebarOpen ? '◀' : '▶'}
+        </button>
       </div>
 
       {/* 主視窗 */}
