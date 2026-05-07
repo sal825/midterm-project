@@ -95,6 +95,8 @@ style.textContent = `
   display: flex;
   position: relative;
   flex-shrink: 0;
+   min-width: 22px;  /* 加這行，確保收起後 wrapper 至少保留按鈕的寬度 */
+    height: 100%;
 }
 .mobile-menu-btn {
   display: none;
@@ -111,6 +113,7 @@ style.textContent = `
   background: rgba(0,0,0,0.3);
   z-index: 99;
 }
+/* 修改這段 */
 @media (max-width: 768px) {
   .sidebar {
     position: fixed !important;
@@ -123,19 +126,23 @@ style.textContent = `
   .sidebar.mobile-open {
     transform: translateX(0) !important;
   }
-  .sidebar.collapsed {
-    width: 280px !important;
-    transform: translateX(-100%);
+  
+  /* 關鍵修正：讓箭頭在手機版不消失，且浮在最上層 */
+  .sidebar-toggle-btn { 
+    display: flex !important; 
+    position: fixed; 
+    z-index: 201; /* 確保在 sidebar 之上 */
   }
-  .sidebar-toggle-btn { display: none !important; }
+  
   .mobile-menu-btn { display: block !important; }
-  .sidebar-overlay { display: block; }
   .sidebar-overlay.active { display: block; }
 }
 `;
 document.head.appendChild(style);
 
 function App() {
+  // 1. 在狀態區新增
+const [isNarrow, setIsNarrow] = useState(window.innerWidth <= 768);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [user, setUser] = useState(null);
@@ -178,13 +185,26 @@ function App() {
   // 視窗縮小時自動收起
   useEffect(() => {
     const handleResize = () => {
-      if (window.innerWidth <= 768) {
-        setMobileSidebarOpen(false);
+      const narrow = window.innerWidth <= 768;
+      setIsNarrow(narrow);
+      
+      if (window.innerWidth < 900) {
+        setSidebarOpen(false);
+      } else {
+        setSidebarOpen(true);
       }
     };
+    handleResize();
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
   }, []);
+  const toggleSidebar = () => {
+    if (isNarrow) {
+      setMobileSidebarOpen(!mobileSidebarOpen);
+    } else {
+      setSidebarOpen(!sidebarOpen);
+    }
+  };
 
   useEffect(() => { activeRoomRef.current = activeRoom; }, [activeRoom]);
 
@@ -615,7 +635,12 @@ function App() {
               />
             </div>
 
-            <label>頭像設定:</label>
+            <label style={{ display: "flex", alignItems: "baseline", gap: "8px", marginBottom: "5px" }}>
+              <span style={{ fontWeight: "bold" }}>頭像設定</span>
+              <span style={{ fontSize: "11px", color: "#888", fontWeight: "normal" }}>
+                * 建議上傳 1:1 比例圖片或網址，本地上傳限制 1MB 以內
+              </span>
+            </label>
             <div style={{ display: "flex", gap: "10px", marginTop: "5px", marginBottom: "15px" }}>
               <input 
                 className="profile-input" 
@@ -673,7 +698,7 @@ function App() {
 
       {/* 側邊欄 wrapper */}
       <div className="sidebar-wrapper">
-        <div className={`sidebar ${!sidebarOpen ? 'collapsed' : ''}`}>
+        <div className={`sidebar ${!sidebarOpen ? 'collapsed' : ''} ${mobileSidebarOpen ? 'mobile-open' : ''}`}>
           <div style={{ padding: "20px", borderBottom: "1px solid #ddd", display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}>
             <div onClick={() =>{setTempProfileData({ ...profileData });setIsProfileOpen(true);}} style={{ cursor: "pointer", display: "flex", alignItems: "center", gap: "10px" }}>
               <img src={profileData.photoURL} className="sidebar-avatar" style={{ width: "35px", height: "35px" }} />
@@ -709,11 +734,16 @@ function App() {
         {/* 收合按鈕：在 sidebar 外層，不受 overflow:hidden 影響 */}
         <button
           className="sidebar-toggle-btn"
-          style={{ left: sidebarOpen ? "320px" : "0px" }}
-          onClick={() => setSidebarOpen(!sidebarOpen)}
-          title={sidebarOpen ? "收起側邊欄" : "展開側邊欄"}
+          style={{ 
+            // 根據是否為窄螢幕計算 left 位置
+            left: isNarrow 
+              ? (mobileSidebarOpen ? "280px" : "0px") 
+              : (sidebarOpen ? "320px" : "0px") 
+          }}
+          onClick={toggleSidebar}
+          
         >
-          {sidebarOpen ? '◀' : '▶'}
+          {(isNarrow ? mobileSidebarOpen : sidebarOpen) ? '◀' : '▶'}
         </button>
       </div>
 
