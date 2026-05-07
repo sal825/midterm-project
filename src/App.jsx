@@ -366,7 +366,7 @@ const [isNarrow, setIsNarrow] = useState(window.innerWidth <= 768);
     }
 
     await addDoc(collection(db, "rooms", activeRoom.id, "messages"), {
-      text: sanitize(newMessage), 
+      text: newMessage,
       createdAt: serverTimestamp(), 
       uid: user.uid, 
       displayName: user.displayName,
@@ -394,7 +394,7 @@ const [isNarrow, setIsNarrow] = useState(window.innerWidth <= 768);
   const handleEdit = async (msgId) => {
     if (!editText.trim()) return;
     await updateDoc(doc(db, "rooms", activeRoom.id, "messages", msgId), {
-      text: sanitize(editText), 
+      text: editText, 
       isEdited: true
     });
     setEditingId(null);
@@ -709,7 +709,7 @@ const [isNarrow, setIsNarrow] = useState(window.innerWidth <= 768);
           
           <div style={{ flex: 1, overflowY: "auto", width: "100%" }}>
             <div style={{ padding: "10px 20px", background: "#f8f9fa", fontSize: "13px", color: "#666", fontWeight: "bold", display: "flex", justifyContent: "space-between" }}>
-              <span>聊天室</span> <button onClick={handleCreateGroup} style={{ border: "none", background: "none", cursor: "pointer", fontSize: "16px" }}>👥+</button>
+              <span>創建聊天室</span> <button onClick={handleCreateGroup} style={{ border: "none", background: "none", cursor: "pointer", fontSize: "16px" }}>👥+</button>
             </div>
             {rooms.map(room => (
               <div key={room.id} onClick={() =>{ setActiveRoom(room);setSearchTerm("");setReplyTo(null);setNewMessage("")}} style={{ padding: "12px 20px", cursor: "pointer", background: activeRoom?.id === room.id ? "#e6f2ff" : "none", borderBottom: "1px solid #eee", display: "flex", alignItems: "center", gap: "12px" }}>

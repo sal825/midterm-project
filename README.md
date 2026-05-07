@@ -1,16 +1,73 @@
-# React + Vite
+# NTHU CS2410 Software Studio - Midterm Project: Chatroom
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
-Currently, two official plugins are available:
+## 🌐 相關連結
+* **Firebase Hosting:** https://chatroom-f605d.web.app
+* **GitHub Repository:** https://github.com/sal825/midterm-project.git
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+---
 
-## React Compiler
+## 🛠️ 本地開發環境設置 (Local Setup) - Step by Step
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+為了確保您能順利在本地端運行此專案，請依照以下步驟進行：
 
-## Expanding the ESLint configuration
+### Step 1: 取得並進入專案
+1. 將下載的壓縮檔 `Midterm_Project_學號.zip` 解壓縮。
+   > **注意：** 壓縮檔內依規定不包含 `node_modules` 資料夾。
+2. 開啟終端機 (Terminal / Command Prompt)，並導覽至該專案根目錄。
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+### Step 2: 安裝相依套件
+在專案根目錄下，執行以下指令安裝 React 與 Firebase 等必要相依套件：
+```bash
+npm install
+```
+
+
+## 功能一覽
+
+### 1. 基礎組件 (Basic Components - 50%)
+*   **會員機制 (Membership):** 支援 Email 註冊與登入。
+*   **資料庫讀寫 (Database):** 所有會員資料與訊息均透過 Firestore 進行安全讀寫，並設定對應權限。
+*   **響應式設計 (RWD):** 
+    *   側邊欄可透過箭頭按鈕自由收合。
+    *   在螢幕被從較寬縮到較窄的視窗時，側邊欄會自動收起，需要換聊天室時可再拉開。
+    *   箭頭按鈕在任何尺寸下皆保持可見且功能正常。
+*   **聊天室核心:** 
+    *   側邊欄在個人檔案欄位下分三部分:1.創建新聊天室按鈕 2.好友列表 3.所有使用者中非好友的列表
+    *   去側邊欄最下方非好友的列表可加好友。
+    *   按下創建新聊天室旁的👥+可創建新群組，命名後按頁面右上的邀請可邀請你的好友用戶，邀請後對方就會在群組中，新群組會出現在好友列表中。 
+    *   進入群組聊天室後，右上邀請好友入群的旁邊可解散群組。
+    *   按下好友列表的人可選擇和誰聊天。 
+    *   自動載入所有歷史訊息並保持滾動至最新位置。
+
+### 2. 進階組件 (Advanced Components - 35%)
+*   **框架:** 使用 **React** 構建組件化 UI。
+*   **第三方登入:** 整合 **Google Login** 快速登入。
+*   **瀏覽器通知 (Chrome Notification):** 當收到新訊息且視窗不在前台時，自動發送系統通知（需允許通知權限）。
+*   **CSS 動畫:** 實作訊息滑入效果，傳訊息時訊息會用滑入的方式出現。
+*   **安全性 (Sanitization):** 自動過濾訊息中的 HTML 標籤（如 `<script>`），防止 XSS 攻擊。
+*   **個人資料頁面 (User Profile):**
+    *   支援編輯：頭像（網址或本地上傳圖片）、暱稱、Email、電話、地址。
+    *   編輯完畢需要按儲存才會更改實際顯示頭像以及實際存入的個人資料。
+    *   **本地上傳限制 1MB 以內**，並在 UI 上提供明確提示與阻擋邏輯。
+*   **進階訊息操作:**
+    *   **收回訊息:** 僅限收回自己發送的訊息。
+    *   **編輯訊息:** 支援對已發送的文字進行修改，並顯示「已編輯」標記。
+    *   **搜尋訊息:** 提供即時關鍵字過濾功能。
+    *   **發送圖片:** 按文字輸入欄旁的🖼️發送圖片訊息。
+
+### 3. 加分功能 (Bonus Components - 10%)
+*   **封鎖使用者 (Block User):** 
+    *   User A 封鎖 User B 後，雙方無法傳送私訊。
+    *   雙方聊天室的聊天介面會顯示紅色警告通知目前處於封鎖狀態。
+    *   在群組中，封鎖者與被封鎖者的訊息會相互隱藏。
+*   **表情回應 (Message Emoji):** 使用者可對任何訊息按讚或給予表情，並支援即時統計數量與取消回應。
+*   **指定訊息回覆 (Reply):** 
+    *   回覆時，輸入框上方會顯示原訊息預覽。
+    *   對話框中清晰顯示引用關係。
+    *   點擊回覆內容可自動**跳轉並滾動**至原始訊息位置，並伴隨高亮動畫。
+
+---
+
+## 📝 版本控制
+本專案使用 **Git** 進行開發紀錄，確保開發過程透明且有條理。
